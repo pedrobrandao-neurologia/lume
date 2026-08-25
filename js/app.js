@@ -10,13 +10,13 @@ import { createRoiTool } from './roi.js'
 import { bakeOblique } from './oblique.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.4.0'
+const VERSION = '0.5.0'
 
 const state = {
-  nv: null,
-  nv2: null,           // segundo visualizador (comparação lado a lado)
-  compare: false,
-  rightId: null,       // série exibida no painel direito
+  nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
+  panels: [],          // {nv, canvas, id: seriesId, view} — painéis de comparação (índice 0 = principal)
+  layout: 1,           // nº de painéis visíveis (1–4)
+  focus: 0,            // painel focado: recebe as trocas de corte e as séries clicadas
   series: [],          // SeriesEntry[]
   activeId: null,
   vol: null,           // NVImage base em exibição (original ou oblíquo)
@@ -64,75 +64,141 @@ async function initViewer() {
     }
   }
   state.nv = nv
+  await ensurePanel(0) // registra o visualizador como painel principal
+}
+
+/* ---------------- comparação em 1–4 painéis sincronizados ---------------- */
+// Cada painel tem série e orientação próprias (ex.: coluna em axial, sagital e
+// coronal ao mesmo tempo); o cursor/scroll é sincronizado em mm entre todos,
+// o que localiza a mesma lesão tridimensionalmente em todos os painéis.
+const PANEL_CANVAS = ['gl', 'gl2', 'gl3', 'gl4']
+const DEFAULT_VIEWS = ['mpr', 'sagittal', 'coronal', 'axial'] // padrão ao abrir cada painel
+
+async function ensurePanel(i) {
+  if (state.panels[i]) return state.panels[i]
+  const canvas = $(PANEL_CANVAS[i])
+  let nv
+  if (i === 0) {
+    nv = state.nv // o painel principal é o visualizador já criado
+  } else {
+    nv = new Niivue({
+      backColor: [0, 0, 0, 1],
+      crosshairColor: [0.31, 0.7, 0.75, 0.9], // teal nos painéis de comparação
+      show3Dcrosshair: true,
+      dragAndDropEnabled: false,
+      multiplanarForceRender: false,
+    })
+    await nv.attachToCanvas(canvas)
+    nv.opts.yoke3Dto2DZoom = true
+  }
+  const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i] }
+  state.panels[i] = panel
+  canvas.addEventListener('pointerdown', () => focusPanel(i))
   applyMouseConfig()
+  rewireSync()
+  return panel
 }
 
-/* ---------------- comparação lado a lado ---------------- */
-async function ensureCompareViewer() {
-  if (state.nv2) return state.nv2
-  const nv2 = new Niivue({
-    backColor: [0, 0, 0, 1],
-    crosshairColor: [0.31, 0.7, 0.75, 0.9], // teal: distingue o painel de comparação
-    show3Dcrosshair: true,
-    dragAndDropEnabled: false,
-    multiplanarForceRender: false,
-  })
-  await nv2.attachToCanvas($('gl2'))
-  nv2.setSliceType(nv2.sliceTypeMultiplanar)
-  nv2.opts.yoke3Dto2DZoom = true
-  state.nv2 = nv2
-  applyMouseConfig()
-  // sincronização bidirecional em mm: cursor, scroll de cortes, pan/zoom e câmera 3D
-  state.nv.broadcastTo(nv2, { '2d': true, '3d': true })
-  nv2.broadcastTo(state.nv, { '2d': true, '3d': true })
-  return nv2
-}
-
-async function setCompare(on) {
-  if (on === state.compare) return
-  state.compare = on
-  $('btnCompare').classList.toggle('active', on)
-  $('stage').classList.toggle('split', on)
-  $('gl2').hidden = !on
-  if (on) await ensureCompareViewer()
-  // o ResizeObserver do NiiVue reage à mudança de layout; força um quadro por garantia
-  requestAnimationFrame(() => {
-    try { state.nv.drawScene(); state.nv2?.drawScene() } catch { /* canvas ainda sem tamanho */ }
-  })
-  markActiveThumbs()
-  if (!on) log('Comparação encerrada.')
-}
-
-async function compareSeries(id) {
-  const entry = state.series.find((s) => s.id === id)
-  if (!entry) return
-  if (!state.compare) await setCompare(true)
-  log(`Comparando com ${entry.file.name}…`); progress(0.3)
-  try {
-    let vol = await volumeFor(entry)
-    // mesma série nos dois painéis: clona para não compartilhar o NVImage entre contextos GL
-    if (state.nv.volumes.includes(vol)) vol = vol.clone()
-    const nv2 = state.nv2
-    while (nv2.volumes.length) nv2.removeVolume(nv2.volumes[0])
-    await nv2.addVolume(vol)
-    state.rightId = id
-    const v = nv2.volumes[0]
-    if (entry.sidecar.Modality === 'CT') { v.cal_min = 0; v.cal_max = 80 }
-    else { v.cal_min = v.robust_min ?? v.global_min; v.cal_max = v.robust_max ?? v.global_max }
-    nv2.updateGLVolume()
-    markActiveThumbs()
-    progress(0)
-    log(`Comparando: ${entry.file.name} à direita — cursor e scroll sincronizados em mm.`)
-  } catch (err) {
-    console.error(err); progress(0)
-    log('Falha na comparação: ' + err.message)
+// religa a sincronização bidirecional (cursor em mm, pan/zoom, câmera 3D)
+// entre todos os painéis visíveis; a orientação de corte NÃO é sincronizada.
+function rewireSync() {
+  const active = state.panels.slice(0, state.layout).filter(Boolean)
+  for (const p of active) {
+    const others = active.filter((q) => q !== p).map((q) => q.nv)
+    p.nv.broadcastTo(others, { '2d': true, '3d': true })
   }
 }
 
+function applyPanelView(panel) {
+  const nv = panel.nv
+  const t = {
+    mpr: nv.sliceTypeMultiplanar, axial: nv.sliceTypeAxial,
+    coronal: nv.sliceTypeCoronal, sagittal: nv.sliceTypeSagittal, render: nv.sliceTypeRender,
+  }[panel.view]
+  nv.setSliceType(t)
+}
+
+async function setLayout(n) {
+  n = Math.max(1, Math.min(4, n))
+  state.layout = n
+  $('stage').className = `stage layout-${n}`
+  document.querySelectorAll('.tool[data-layout]').forEach((b) =>
+    b.classList.toggle('active', Number(b.dataset.layout) === n))
+  for (let i = 0; i < 4; i++) {
+    const c = $(PANEL_CANVAS[i])
+    c.hidden = i >= n
+    // o attachToCanvas do NiiVue define style inline no canvas; o inline vence a folha,
+    // então o display precisa ser gerido aqui também
+    c.style.display = i >= n ? 'none' : 'block'
+  }
+  for (let i = 0; i < n; i++) {
+    const isNew = !state.panels[i]
+    const panel = await ensurePanel(i)
+    // painel recém-aberto: recebe a série ativa na orientação padrão (sag/cor/ax)
+    if (isNew && i > 0 && state.activeId && !panel.id) {
+      applyPanelView(panel)
+      await loadIntoPanel(i, state.activeId)
+    }
+  }
+  if (state.focus >= n) focusPanel(0)
+  rewireSync()
+  requestAnimationFrame(() => {
+    for (const p of state.panels.slice(0, n)) { try { p?.nv.drawScene() } catch { /* sem tamanho ainda */ } }
+  })
+  markActiveThumbs()
+  if (n > 1) log(`${n} painéis — clique num painel para focá-lo; miniatura carrega no focado; Ax/Cor/Sag muda o corte do focado.`)
+}
+
+function focusPanel(i) {
+  if (i >= state.layout || !state.panels[i]) return
+  state.focus = i
+  document.querySelectorAll('.stage canvas').forEach((c, k) => c.classList.toggle('focused', PANEL_CANVAS[i] === c.id && state.layout > 1))
+  const view = state.panels[i].view
+  document.querySelectorAll('.tool[data-view]').forEach((b) =>
+    b.classList.toggle('active', b.dataset.view === view))
+  $('panel3d').hidden = view !== 'render'
+}
+
+/** Carrega uma série num painel de comparação (índice ≥ 1). */
+async function loadIntoPanel(i, id) {
+  const entry = state.series.find((s) => s.id === id)
+  const panel = state.panels[i]
+  if (!entry || !panel || i === 0) return
+  log(`Painel ${i + 1}: abrindo ${entry.file.name}…`); progress(0.3)
+  try {
+    let vol = await volumeFor(entry)
+    // NVImage já exibido em outro painel: clona para não compartilhar entre contextos GL
+    if (state.panels.some((p) => p && p.nv.volumes.includes(vol))) vol = vol.clone()
+    const nv = panel.nv
+    while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
+    await nv.addVolume(vol)
+    panel.id = id
+    const v = nv.volumes[0]
+    if (entry.sidecar.Modality === 'CT') { v.cal_min = 0; v.cal_max = 80 }
+    else { v.cal_min = v.robust_min ?? v.global_min; v.cal_max = v.robust_max ?? v.global_max }
+    nv.updateGLVolume()
+    applyPanelView(panel)
+    markActiveThumbs()
+    progress(0)
+    log(`Painel ${i + 1}: ${entry.file.name} (${panel.view}) — cursor sincronizado em mm.`)
+  } catch (err) {
+    console.error(err); progress(0)
+    log('Falha ao abrir no painel: ' + err.message)
+  }
+}
+
+// clique direito na miniatura: manda a série para o painel focado (ou o 2º)
+async function compareSeries(id) {
+  if (state.layout < 2) await setLayout(2)
+  const target = state.focus > 0 ? state.focus : 1
+  await loadIntoPanel(target, id)
+}
+
 function markActiveThumbs() {
+  const cmpIds = new Set(state.panels.slice(1, state.layout).map((p) => p?.id).filter(Boolean))
   document.querySelectorAll('.thumb').forEach((t) => {
     t.classList.toggle('active', t.id === `th-${state.activeId}`)
-    t.classList.toggle('active-cmp', state.compare && t.id === `th-${state.rightId}`)
+    t.classList.toggle('active-cmp', cmpIds.has(t.id.replace(/^th-/, '')))
   })
 }
 
@@ -156,7 +222,7 @@ function assignTool(button, tool) {
 }
 
 function applyMouseConfig() {
-  for (const nv of [state.nv, state.nv2].filter(Boolean)) {
+  for (const nv of state.panels.filter(Boolean).map((p) => p.nv)) {
     nv.opts.dragModePrimary = TOOL_MODES[state.mouse.left]
     nv.opts.dragMode = TOOL_MODES[state.mouse.right]
     nv.opts.mouseEventConfig = {
@@ -178,15 +244,13 @@ function applyMouseConfig() {
 }
 
 function setView(view) {
-  for (const nv of [state.nv, state.nv2].filter(Boolean)) {
-    const t = {
-      mpr: nv.sliceTypeMultiplanar, axial: nv.sliceTypeAxial,
-      coronal: nv.sliceTypeCoronal, sagittal: nv.sliceTypeSagittal, render: nv.sliceTypeRender,
-    }[view]
-    nv.setSliceType(t)
-  }
+  // a orientação vale para o painel focado — os demais mantêm o corte próprio
+  const panel = state.panels[state.focus]
+  if (!panel) return
+  panel.view = view
+  applyPanelView(panel)
   $('panel3d').hidden = view !== 'render'
-  if (view === 'render') applyIllumination()
+  if (view === 'render' && state.focus === 0) applyIllumination()
   document.querySelectorAll('.tool[data-view]').forEach((b) =>
     b.classList.toggle('active', b.dataset.view === view))
 }
@@ -278,9 +342,10 @@ async function addSeries(entries) {
       <span class="th-cap"><strong title="${title}">${title}</strong>
       <span>${mod ? `<span class="badge">${mod}</span>` : ''}<span class="dims mono"></span></span></span>
     </div>`
-    item.onclick = () => openSeries(e.id)
+    // clique: abre no painel focado (principal ou de comparação); clique direito: manda para comparação
+    item.onclick = () => (state.focus > 0 ? loadIntoPanel(state.focus, e.id) : openSeries(e.id))
     item.oncontextmenu = (ev) => { ev.preventDefault(); compareSeries(e.id) }
-    item.title = `${sc.SeriesDescription || e.file.name} — clique: abrir · clique direito: comparar lado a lado`
+    item.title = `${sc.SeriesDescription || e.file.name} — clique: abrir no painel focado · clique direito: comparar`
     $('seriesList').appendChild(item)
     makeThumb(e.file).then(({ canvas, hdr }) => {
       item.querySelector('.ph').replaceWith(canvas)
@@ -298,9 +363,10 @@ async function volumeFor(entry) {
     vol = await NVImage.loadFromFile({ file: entry.file, name: entry.file.name })
     state.cache.set(entry.id, vol)
     // limita o cache para conter a memória, preservando os painéis em exibição
+    const shown = new Set([entry.id, state.activeId, ...state.panels.map((p) => p?.id)])
     for (const k of state.cache.keys()) {
-      if (state.cache.size <= 4) break
-      if (k !== entry.id && k !== state.activeId && k !== state.rightId) state.cache.delete(k)
+      if (state.cache.size <= 6) break
+      if (!shown.has(k)) state.cache.delete(k)
     }
   }
   return vol
@@ -312,8 +378,8 @@ async function openSeries(id) {
   log(`Abrindo ${entry.file.name}…`); progress(0.3)
   try {
     let vol = await volumeFor(entry)
-    // mesma série nos dois painéis: clona para não compartilhar o NVImage entre contextos GL
-    if (state.nv2?.volumes.includes(vol)) vol = vol.clone()
+    // NVImage já exibido noutro painel: clona para não compartilhar entre contextos GL
+    if (state.panels.some((p, k) => k > 0 && p && p.nv.volumes.includes(vol))) vol = vol.clone()
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
     await nv.addVolume(vol)
@@ -321,6 +387,7 @@ async function openSeries(id) {
     state.origVol = vol
     state.mipVol = null
     state.activeId = id
+    if (state.panels[0]) state.panels[0].id = id
     $('btnMipOff').hidden = true
     $('btnObliqueOff').hidden = true
     state.roi?.clear()
@@ -532,16 +599,11 @@ function bind() {
   })
   document.querySelectorAll('.tool[data-view]').forEach((b) => (b.onclick = () => setView(b.dataset.view)))
 
-  $('btnCompare').onclick = async () => {
-    if (!state.series.length) { log('Abra ao menos uma série antes de comparar.'); return }
-    if (state.compare) { setCompare(false); return }
-    await setCompare(true)
-    if (!state.rightId) {
-      // sugere a próxima série do estudo (ou repete a ativa, se for a única)
-      const other = state.series.find((s) => s.id !== state.activeId) || state.series[0]
-      await compareSeries(other.id)
-    }
-  }
+  document.querySelectorAll('.tool[data-layout]').forEach((b) => (b.onclick = async () => {
+    const n = Number(b.dataset.layout)
+    if (n > 1 && !state.series.length) { log('Abra ao menos uma série antes de comparar.'); return }
+    await setLayout(n)
+  }))
 
   $('btnDicomDir').onclick = () => $('inDicomDir').click()
   $('btnFiles').onclick = () => $('inFiles').click()
@@ -585,7 +647,7 @@ function bind() {
 
   $('btnClearMeasures').onclick = () => { state.measures = []; renderMeasures() }
   $('btnReset').onclick = () => {
-    for (const nv of [state.nv, state.nv2].filter(Boolean)) {
+    for (const nv of state.panels.filter(Boolean).map((p) => p.nv)) {
       nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
       nv.drawScene()
     }
@@ -628,5 +690,5 @@ bind()
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {})
 }
-window.lume = { state, openSeries, compareSeries, setCompare, handleFiles, VERSION } // acesso programático / testes
+window.lume = { state, openSeries, compareSeries, setLayout, focusPanel, loadIntoPanel, handleFiles, VERSION } // acesso programático / testes
 log(`Lume v${VERSION} — pronto. Abra uma pasta DICOM, NIfTI ou ZIP.`)
