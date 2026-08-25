@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Lume — visualizador DICOM/NIfTI no navegador</title>
+<meta name="description" content="Visualizador de imagens médicas (DICOM e NIfTI) que roda inteiramente no navegador: janelamento, medidas, MPR, MIP e reconstrução 3D. Nenhuma imagem sai do seu computador." />
+<meta name="theme-color" content="#0a0c0e" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <h1>Lume</h1>
+    <span class="brand-sub">leitura local · nada sai do seu computador</span>
+  </div>
+
+  <nav class="tools" aria-label="Ferramentas">
+    <div class="tool-group" role="group" aria-label="Interação">
+      <button class="tool active" id="toolCrosshair" data-tool="crosshair" title="Cursor / localizador (arrastar)">✛ Cursor</button>
+      <button class="tool" id="toolWindow" data-tool="windowing" title="Janelamento (arrastar: ← → largura, ↑ ↓ centro)">◐ Janela</button>
+      <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância (arrastar)">⟷ Medir</button>
+      <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo (dois traços)">∠ Ângulo</button>
+      <button class="tool" id="toolPan" data-tool="pan" title="Mover imagem (arrastar)">✥ Mover</button>
+    </div>
+    <div class="tool-group" role="group" aria-label="Corte">
+      <button class="tool view active" data-view="mpr" title="Multiplanar">MPR</button>
+      <button class="tool view" data-view="axial">Ax</button>
+      <button class="tool view" data-view="coronal">Cor</button>
+      <button class="tool view" data-view="sagittal">Sag</button>
+      <button class="tool view" data-view="render" title="Reconstrução volumétrica">3D</button>
+    </div>
+    <div class="tool-group">
+      <button class="tool" id="btnReset" title="Restaurar zoom, janela e posição">Restaurar</button>
+      <button class="tool" id="btnShot" title="Salvar captura da tela atual (PNG)">Captura</button>
+    </div>
+  </nav>
+</header>
+
+<div class="workspace">
+
+  <!-- ================= faixa de séries (negatoscópio) ================= -->
+  <aside class="strip" id="strip" aria-label="Séries do estudo">
+    <div class="strip-head">
+      <h2>Séries</h2>
+      <span class="mono" id="stripCount">0</span>
+    </div>
+    <div class="strip-list" id="seriesList" role="listbox" aria-label="Miniaturas das séries"></div>
+    <div class="strip-open">
+      <button id="btnDicomDir" class="primary">Abrir pasta DICOM</button>
+      <button id="btnFiles">Arquivos (DICOM · NIfTI · ZIP)</button>
+      <input type="file" id="inDicomDir" webkitdirectory multiple hidden />
+      <input type="file" id="inFiles" multiple hidden
+             accept=".dcm,.ima,.nii,.gz,.zip,application/zip,application/dicom" />
+    </div>
+  </aside>
+
+  <!-- ================= viewport ================= -->
+  <main class="stage" id="stage">
+    <div class="dropzone" id="dropzone">
+      <div class="dz-card">
+        <p class="dz-title">Arraste aqui uma pasta DICOM,<br />arquivos <span class="mono">.nii/.nii.gz</span> ou um <span class="mono">.zip</span></p>
+        <p class="dz-sub">Tudo é lido e convertido no seu navegador (dcm2niix + NiiVue).<br />Nenhum dado é enviado a servidor algum.</p>
+      </div>
+    </div>
+    <canvas id="gl"></canvas>
+    <div class="progressbar" id="progress" hidden><div id="progressFill"></div></div>
+  </main>
+
+  <!-- ================= inspetor ================= -->
+  <aside class="inspector" id="inspector" aria-label="Controles e informações">
+
+    <section class="panel" id="panelWindow">
+      <h3>Janela</h3>
+      <div class="row">
+        <label>Centro <input type="number" id="wl" step="1" /></label>
+        <label>Largura <input type="number" id="ww" step="1" min="1" /></label>
+      </div>
+      <div class="presets" id="ctPresets" hidden>
+        <button data-wl="40"  data-ww="80">Cérebro</button>
+        <button data-wl="75"  data-ww="215">Subdural</button>
+        <button data-wl="32"  data-ww="8">AVC</button>
+        <button data-wl="600" data-ww="2800">Osso</button>
+        <button data-wl="-600" data-ww="1500">Pulmão</button>
+        <button data-wl="50"  data-ww="350">Mediastino</button>
+        <button data-wl="50"  data-ww="400">Abdome</button>
+      </div>
+      <div class="row">
+        <label class="grow">Mapa de cor
+          <select id="colormap">
+            <option value="gray" selected>Cinza</option>
+            <option value="bone">Bone</option>
+            <option value="inferno">Inferno</option>
+          </select>
+        </label>
+        <button id="btnAutoWindow" title="Janela automática (percentis robustos)">Auto</button>
+      </div>
+    </section>
+
+    <section class="panel" id="panelMip">
+      <h3>Projeção — MIP</h3>
+      <div class="row">
+        <label class="grow">Eixo <select id="mipAxis"></select></label>
+        <label>Espessura <input type="number" id="mipMM" value="12" min="2" max="120" step="2" /> mm</label>
+      </div>
+      <div class="row">
+        <button id="btnMip" class="primary grow">Aplicar MIP</button>
+        <button id="btnMipOff" hidden>Voltar ao original</button>
+      </div>
+      <p class="hint">Intensidade máxima em bloco deslizante ao longo do eixo escolhido — útil para vasos e nódulos. MinIP e média de slab estão no roteiro.</p>
+    </section>
+
+    <section class="panel" id="panel3d" hidden>
+      <h3>3D</h3>
+      <label class="grow">Sombreamento
+        <select id="illum">
+          <option value="0.6" selected>Superfície</option>
+          <option value="0">Sem sombreamento</option>
+          <option value="-1">Acúmulo (raios-X)</option>
+        </select>
+      </label>
+      <label class="rangeRow">Plano de corte
+        <input type="range" id="clip" min="-1" max="1" step="0.02" value="2" />
+      </label>
+      <p class="hint">Arraste para girar. O plano de corte remove a metade anterior do volume conforme o controle.</p>
+    </section>
+
+    <section class="panel" id="panelMeasures">
+      <h3>Medidas <button id="btnClearMeasures" class="mini">limpar</button></h3>
+      <ol class="measures mono" id="measureList"><li class="empty">Nenhuma medida ainda.</li></ol>
+    </section>
+
+    <section class="panel" id="panelMeta">
+      <h3>Série</h3>
+      <dl class="meta mono" id="metaList"><div class="empty">Nenhuma série aberta.</div></dl>
+    </section>
+
+  </aside>
+</div>
+
+<footer class="statusbar">
+  <span id="statusLoc" class="mono"></span>
+  <span id="statusMsg">pronto — abra uma pasta DICOM, NIfTI ou ZIP</span>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

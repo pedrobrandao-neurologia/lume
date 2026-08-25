@@ -1,0 +1,17 @@
+{
+  "name": "Lume — visualizador DICOM/NIfTI no navegador",
+  "short_name": "Lume",
+  "description": "Leitura rápida de DICOM e NIfTI inteiramente no navegador: janelamento, medidas, MPR, MIP e reconstrução 3D. Nenhuma imagem sai do computador.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a0c0e",
+  "theme_color": "#0a0c0e",
+  "lang": "pt-BR",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "categories": ["medical", "productivity", "education"]
+}

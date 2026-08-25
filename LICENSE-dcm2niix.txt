@@ -1,0 +1,1 @@
+dcm2niix WASM build (@niivue/dcm2niix) - BSD-2-Clause, Chris Rorden and dcm2niix developers.
