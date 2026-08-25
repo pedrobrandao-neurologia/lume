@@ -44,21 +44,35 @@ export async function convertDicom(files, log = () => {}) {
   return series
 }
 
-/** Roteia qualquer seleção (input, drop): NIfTI direto, ZIP expandido, resto → DICOM. */
-export async function ingest(files, log = () => {}) {
+/** Cria uma entrada de série a partir de um NIfTI já em memória. */
+export function makeEntry(file, sidecar = {}, kind = 'nifti') {
+  return { id: sid(), file, sidecar, kind }
+}
+
+/**
+ * Separa a seleção (input/drop) sem converter nada: expande ZIPs e devolve as
+ * entradas NIfTI prontas + a lista de possíveis DICOM (a decisão de quando e
+ * como convertê-los fica com o chamador — é isso que permite a triagem por
+ * série e o controle de memória).
+ */
+export async function splitInput(files, log = () => {}) {
   let all = Array.from(files)
-  // expande ZIPs
   const zips = all.filter((f) => /\.zip$/i.test(f.name))
   all = all.filter((f) => !/\.zip$/i.test(f.name))
   for (const z of zips) {
     log(`Descompactando ${z.name}…`)
     all.push(...await readZip(z))
   }
-  const out = []
-  const niftis = all.filter((f) => NIFTI_RE.test(f.name))
-  for (const f of niftis) out.push({ id: sid(), file: f, sidecar: {}, kind: 'nifti' })
-  const rest = all.filter((f) => !NIFTI_RE.test(f.name) && !SKIP_RE.test(f.name))
-  if (rest.length) out.push(...await convertDicom(rest, log))
+  const entries = all.filter((f) => NIFTI_RE.test(f.name)).map((f) => makeEntry(f))
+  const dicoms = all.filter((f) => !NIFTI_RE.test(f.name) && !SKIP_RE.test(f.name))
+  return { entries, dicoms }
+}
+
+/** Roteia qualquer seleção (input, drop): NIfTI direto, ZIP expandido, resto → DICOM. */
+export async function ingest(files, log = () => {}) {
+  const { entries, dicoms } = await splitInput(files, log)
+  const out = [...entries]
+  if (dicoms.length) out.push(...await convertDicom(dicoms, log))
   if (!out.length) throw new Error('nenhuma imagem reconhecida na seleção')
   return out
 }
