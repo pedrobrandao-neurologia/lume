@@ -28,6 +28,8 @@
       <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância — clique com o botão do mouse que deseja usar">⟷ Medir</button>
       <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo (dois traços) — clique com o botão do mouse que deseja usar">∠ Ângulo</button>
       <button class="tool" id="toolPan" data-tool="pan" title="Mover imagem — clique com o botão do mouse que deseja usar">✥ Mover</button>
+      <button class="tool" id="toolRoiEllipse" title="ROI elíptica com estatística (média, DP, área) — arraste no painel esquerdo · tecla E">◯ ROI</button>
+      <button class="tool" id="toolRoiLasso" title="ROI de traçado livre (laço) — arraste, ou desenhe com o teclado: setas movem, Espaço marca ponto, Enter fecha · tecla L">✎ Laço</button>
       <span class="tools-hint" title="E = botão esquerdo · D = direito · M = do meio">mouse: E·D·M</span>
     </div>
     <div class="tool-group" role="group" aria-label="Corte">
@@ -73,6 +75,7 @@
     </div>
     <canvas id="gl"></canvas>
     <canvas id="gl2" hidden></canvas>
+    <canvas id="roiOverlay"></canvas>
     <div class="progressbar" id="progress" hidden><div id="progressFill"></div></div>
   </main>
 
@@ -124,6 +127,27 @@
         <button id="btnMipOff" hidden>Original</button>
       </div>
       <p class="hint">Bloco deslizante ao longo do eixo escolhido. MIP para vasos e nódulos; MinIP para enfisema, vias aéreas e biliares; média para reduzir ruído.</p>
+    </section>
+
+    <section class="panel" id="panelOblique">
+      <h3>MPR oblíquo</h3>
+      <div class="row">
+        <label>L–R° <input type="number" id="obLR" value="0" min="-90" max="90" step="1" /></label>
+        <label>A–P° <input type="number" id="obAP" value="0" min="-90" max="90" step="1" /></label>
+        <label>S–I° <input type="number" id="obSI" value="0" min="-90" max="90" step="1" /></label>
+      </div>
+      <div class="row">
+        <button id="btnOblique" class="primary grow">Reformatar</button>
+        <button id="btnObliqueOff" hidden>Original</button>
+      </div>
+      <p class="hint">Gira o volume em torno do cursor atual (interpolação trilinear) e reamostra: os cortes do MPR viram planos oblíquos. Ângulos em relação ao volume original; o thick slab pode ser aplicado sobre o resultado.</p>
+    </section>
+
+    <section class="panel" id="panelRoi">
+      <h3>ROI <button id="btnClearRois" class="mini">limpar</button></h3>
+      <label class="check"><input type="checkbox" id="roiMagnet" /> Caneta magnética (ajusta o traço à borda)</label>
+      <ol class="measures mono" id="roiList"><li class="empty">Nenhuma ROI ainda.</li></ol>
+      <p class="hint">◯ ROI: arraste a elipse. ✎ Laço: arraste o traçado livre — ou desenhe pelo teclado: setas movem o cursor (Shift acelera), Espaço marca ponto, Backspace desfaz, Enter fecha, Esc cancela, Del remove a selecionada. Estatística no painel esquerdo: média, DP, mín, máx e área.</p>
     </section>
 
     <section class="panel" id="panel3d" hidden>
