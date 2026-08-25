@@ -116,13 +116,19 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 .thumb .th-cap strong { display: block; color: var(--ink); font-weight: 600; font-size: 11.5px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thumb.active { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber), 0 0 16px -4px rgba(242,180,65,.7); }
+/* série no painel de comparação (direito) — teal, como o cursor daquele painel */
+.thumb.active-cmp { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal), 0 0 14px -4px rgba(79,179,191,.65); }
+.thumb.active.active-cmp { box-shadow: 0 0 0 1px var(--amber), 2px 0 0 1px var(--teal); }
 .thumb .badge { display: inline-block; padding: 0 5px; border-radius: 3px; font: 600 10px/16px var(--mono);
   background: var(--surface-2); color: var(--teal); margin-right: 5px; vertical-align: 1px; }
 .strip-open { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
 
 /* palco */
 .stage { position: relative; min-width: 0; min-height: 0; background: #000; }
-#gl { width: 100%; height: 100%; display: block; touch-action: none; }
+#gl, #gl2 { width: 100%; height: 100%; display: block; touch-action: none; background: #000; }
+/* comparação lado a lado: dois visualizadores sincronizados */
+.stage.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--line); }
+.stage.split #gl, .stage.split #gl2 { min-width: 0; min-height: 0; }
 .dropzone { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; }
 .dropzone.hidden { display: none; }
 .dropzone.hover .dz-card { border-color: var(--amber); }
@@ -144,6 +150,11 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 .grow { flex: 1; }
 .presets { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
 .presets button { font-size: 12px; padding: 3px 8px; }
+/* tecla de atalho dos presets de janela */
+.panel kbd {
+  font: 600 9.5px/14px var(--mono); padding: 0 3px; margin-left: 3px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 3px; color: var(--dim);
+}
 .hint { margin: 8px 0 0; font-size: 11.5px; color: var(--dim); }
 .rangeRow input[type=range] { padding: 0; accent-color: var(--teal); }
 .measures { margin: 0; padding-left: 20px; font-size: 12.5px; max-height: 130px; overflow-y: auto; }
