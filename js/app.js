@@ -10,7 +10,7 @@ import { createRoiTool } from './roi.js'
 import { bakeOblique } from './oblique.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.5.0'
+const VERSION = '0.6.0'
 
 const state = {
   nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
@@ -25,9 +25,55 @@ const state = {
   roi: null,           // controlador de ROIs
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
-  // ferramenta associada a cada botão do mouse, como numa workstation
-  mouse: { left: 'crosshair', right: 'windowing', middle: 'pan' },
+  mouse: null, // gestos do mouse → ação (carregado de MOUSE_DEFAULTS + localStorage)
 }
+
+/* ---------------- gestos do mouse (customizáveis) ---------------- */
+// Ações: as nativas usam os modos de arrasto do NiiVue; as demais são emuladas
+// pelo app (interceptadas antes do NiiVue). Medir/ângulo só existem no motor,
+// portanto ficam restritas aos botões esquerdo/meio/direito e Ctrl/Shift+esq.
+const ACTIONS = {
+  browse:      { label: 'Percorrer cortes',            native: false, emul: true },
+  windowing:   { label: 'Janela (brilho/contraste)',   native: true,  emul: true },
+  zoom:        { label: 'Zoom',                        native: false, emul: true },
+  pan:         { label: 'Mover (pan)',                 native: true,  emul: true },
+  crosshair:   { label: 'Cursor / localizar',          native: true,  emul: false },
+  measurement: { label: 'Medir distância',             native: true,  emul: false },
+  angle:       { label: 'Medir ângulo',                native: true,  emul: false },
+}
+// gestos configuráveis; emulOnly = sem suporte nativo do NiiVue (só ações emuláveis)
+const GESTURES = [
+  { key: 'left',      label: 'Botão esquerdo + arrastar' },
+  { key: 'middle',    label: 'Botão do meio + arrastar' },
+  { key: 'right',     label: 'Botão direito + arrastar' },
+  { key: 'back',      label: 'Botão “voltar” (4º) + arrastar',   emulOnly: true },
+  { key: 'forward',   label: 'Botão “avançar” (5º) + arrastar',  emulOnly: true },
+  { key: 'ctrlLeft',  label: 'Ctrl + botão esquerdo + arrastar' },
+  { key: 'shiftLeft', label: 'Shift + botão esquerdo + arrastar' },
+  { key: 'altLeft',   label: 'Alt + botão esquerdo + arrastar',  emulOnly: true },
+]
+// padrão estilo workstation: esquerdo percorre, meio janela, direito zoom,
+// “voltar” move, Ctrl+esq janela, Shift+esq move
+const MOUSE_DEFAULTS = {
+  left: 'browse', middle: 'windowing', right: 'zoom',
+  back: 'pan', forward: 'windowing',
+  ctrlLeft: 'windowing', shiftLeft: 'pan', altLeft: 'zoom',
+}
+function loadMouse() {
+  const m = { ...MOUSE_DEFAULTS }
+  try {
+    const saved = JSON.parse(localStorage.getItem('lume-mouse') || '{}')
+    for (const g of GESTURES) {
+      const a = saved[g.key]
+      if (a in ACTIONS && (!g.emulOnly || ACTIONS[a].emul)) m[g.key] = a
+    }
+  } catch { /* configuração corrompida → padrões */ }
+  return m
+}
+function saveMouse() {
+  try { localStorage.setItem('lume-mouse', JSON.stringify(state.mouse)) } catch { /* sem storage */ }
+}
+state.mouse = loadMouse()
 
 /* ---------------- utilidades de interface ---------------- */
 function log(msg) { $('statusMsg').textContent = msg }
@@ -54,11 +100,10 @@ async function initViewer() {
 
   nv.onLocationChange = (d) => { $('statusLoc').textContent = d?.string || '' }
   nv.onIntensityChange = () => syncWindowInputs()
-  $('gl').addEventListener('pointerdown', (e) => { state.lastButton = e.button })
+  $('gl').addEventListener('pointerdown', (e) => { state.lastGesture = gestureOf(e) }, true)
   nv.onDragRelease = (p) => {
-    // registra a medida se o botão solto estava com a ferramenta de medição
-    const btn = { 0: 'left', 1: 'middle', 2: 'right' }[state.lastButton]
-    if (btn && state.mouse[btn] === 'measurement' && p?.mmLength > 0.5) {
+    // registra a medida se o gesto solto estava com a ferramenta de medição
+    if (state.mouse[state.lastGesture] === 'measurement' && p?.mmLength > 0.5) {
       state.measures.push(p.mmLength)
       renderMeasures()
     }
@@ -94,6 +139,7 @@ async function ensurePanel(i) {
   const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i] }
   state.panels[i] = panel
   canvas.addEventListener('pointerdown', () => focusPanel(i))
+  installPanelGestures(panel, i)
   applyMouseConfig()
   rewireSync()
   return panel
@@ -202,6 +248,223 @@ function markActiveThumbs() {
   })
 }
 
+/* ---------------- gestos por painel: interceptação e emulação ---------------- */
+function gestureOf(e) {
+  if (e.button === 0) {
+    if (e.ctrlKey) return 'ctrlLeft'
+    if (e.shiftKey) return 'shiftLeft'
+    if (e.altKey) return 'altLeft'
+    return 'left'
+  }
+  return { 1: 'middle', 2: 'right', 3: 'back', 4: 'forward' }[e.button] || null
+}
+
+const VIEW_AXIS = { axial: 2, coronal: 1, sagittal: 0, mpr: 2 } // componente frac RAS do corte
+
+// propaga o cursor deste painel aos demais em mm (mesma semântica do sync)
+function propagateCrosshair(from) {
+  const mm = from.nv.frac2mm(from.nv.scene.crosshairPos)
+  for (const p of state.panels.slice(0, state.layout)) {
+    if (!p || p === from || !p.nv.volumes.length) continue
+    p.nv.scene.crosshairPos = p.nv.mm2frac([mm[0], mm[1], mm[2]])
+    p.nv.drawScene()
+  }
+  from.nv.createOnLocationChange?.()
+}
+
+function stepSlice(panel, dir) {
+  const axis = VIEW_AXIS[panel.view]
+  const vol = panel.nv.volumes[0]
+  if (axis === undefined || !vol) return
+  const dim = vol.dimsRAS?.[axis + 1] || vol.hdr.dims[axis + 1] || 1
+  const f = panel.nv.scene.crosshairPos.slice()
+  f[axis] = Math.min(1, Math.max(0, f[axis] + dir / dim))
+  panel.nv.scene.crosshairPos = f
+  panel.nv.drawScene()
+  propagateCrosshair(panel)
+}
+
+function zoomPanel(panel, factor) {
+  const nv = panel.nv
+  if (panel.view === 'render') {
+    nv.scene.volScaleMultiplier = Math.min(8, Math.max(0.2, nv.scene.volScaleMultiplier * factor))
+  } else {
+    const p = nv.scene.pan2Dxyzmm
+    p[3] = Math.min(16, Math.max(0.2, p[3] * factor))
+    nv.scene.pan2Dxyzmm = p
+  }
+  nv.drawScene()
+}
+
+function windowPanel(panel, dx, dy) {
+  const v = panel.nv.volumes[0]
+  if (!v) return
+  const range = Math.max(1e-6, (v.global_max ?? 1) - (v.global_min ?? 0)) / 250 // por pixel
+  let wl = (v.cal_min + v.cal_max) / 2 + dy * range
+  let ww = Math.max(range, v.cal_max - v.cal_min + dx * range * 2)
+  v.cal_min = wl - ww / 2; v.cal_max = wl + ww / 2
+  panel.nv.updateGLVolume()
+  if (panel === state.panels[0]) syncWindowInputs()
+}
+
+function panMmPerPx(panel) {
+  for (const s of panel.nv.screenSlices) {
+    if (s.axCorSag <= 2 && s.fovMM?.[0] && s.leftTopWidthHeight?.[2]) {
+      return s.fovMM[0] / Math.abs(s.leftTopWidthHeight[2])
+    }
+  }
+  return 0.5
+}
+
+function panPanel(panel, dx, dy, scale) {
+  const p = panel.nv.scene.pan2Dxyzmm
+  p[0] += dx * scale; p[1] -= dy * scale
+  panel.nv.scene.pan2Dxyzmm = p
+  panel.nv.drawScene()
+}
+
+function installPanelGestures(panel, idx) {
+  const canvas = panel.canvas
+  const dpr = () => canvas.width / (canvas.clientWidth || 1)
+  let drag = null
+
+  // intercepta os gestos que o NiiVue não cobre (browse/zoom, Alt, botões 4/5)
+  canvas.addEventListener('pointerdown', (e) => {
+    const g = gestureOf(e)
+    if (!g) return
+    const act = state.mouse[g]
+    const needsEmul = e.button >= 3 || g === 'altLeft' || !ACTIONS[act]?.native
+    if (!needsEmul) return
+    if (!ACTIONS[act]?.emul) { e.preventDefault(); return } // bloqueia navegação do browser
+    if (panel.view === 'render' && (act === 'browse' || act === 'pan')) {
+      if (e.button === 0 && g === 'left') return // 3D: arrasto esquerdo gira o volume (padrão)
+    }
+    e.preventDefault(); e.stopImmediatePropagation()
+    canvas.setPointerCapture(e.pointerId)
+    drag = { act, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, acc: 0, mmpp: act === 'pan' ? panMmPerPx(panel) : 0 }
+  }, true)
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return
+    e.preventDefault(); e.stopImmediatePropagation()
+    const dx = (e.clientX - drag.x) * dpr(), dy = (e.clientY - drag.y) * dpr()
+    drag.x = e.clientX; drag.y = e.clientY
+    if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 3) drag.moved = true
+    if (drag.act === 'browse') {
+      drag.acc += dy
+      const step = 5 * dpr()
+      while (drag.acc >= step) { stepSlice(panel, -1); drag.acc -= step }
+      while (drag.acc <= -step) { stepSlice(panel, 1); drag.acc += step }
+    } else if (drag.act === 'zoom') zoomPanel(panel, Math.exp(-dy * 0.004))
+    else if (drag.act === 'windowing') windowPanel(panel, dx, dy)
+    else if (drag.act === 'pan') panPanel(panel, dx, dy, drag.mmpp)
+  }, true)
+
+  const finish = (e) => {
+    if (!drag) return
+    e.preventDefault(); e.stopImmediatePropagation()
+    // clique sem arrasto com “percorrer cortes”: posiciona o cursor (localiza)
+    if (!drag.moved && drag.act === 'browse') {
+      const r = canvas.getBoundingClientRect()
+      const frac = panel.nv.canvasPos2frac([(e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr()])
+      if (frac && frac[0] >= 0) { panel.nv.scene.crosshairPos = frac; panel.nv.drawScene(); propagateCrosshair(panel) }
+    }
+    drag = null
+  }
+  canvas.addEventListener('pointerup', finish, true)
+  canvas.addEventListener('pointercancel', () => { drag = null }, true)
+  // impede voltar/avançar do navegador e o menu de contexto quando o direito é custom
+  canvas.addEventListener('auxclick', (e) => { if (e.button >= 3 || e.button === 1) e.preventDefault() })
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault())
+
+  // roda: vertical percorre cortes (NiiVue, por painel); Ctrl+roda = zoom;
+  // roda horizontal = série anterior/seguinte
+  let wheelLock = 0
+  canvas.addEventListener('wheel', (e) => {
+    if (e.ctrlKey) {
+      e.preventDefault(); e.stopImmediatePropagation()
+      zoomPanel(panel, Math.exp(-Math.sign(e.deltaY) * 0.12))
+      return
+    }
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 4) {
+      e.preventDefault(); e.stopImmediatePropagation()
+      const now = Date.now()
+      if (now - wheelLock < 250 || state.series.length < 2) return
+      wheelLock = now
+      const cur = idx === 0 ? state.activeId : panel.id
+      const at = state.series.findIndex((s) => s.id === cur)
+      const next = state.series[(at + (e.deltaX > 0 ? 1 : -1) + state.series.length) % state.series.length]
+      if (idx === 0) openSeries(next.id)
+      else loadIntoPanel(idx, next.id)
+    }
+  }, { capture: true, passive: false })
+}
+
+/* ---------------- barra de cortes por painel ---------------- */
+function buildSliceBars() {
+  const stage = $('stage')
+  state.sliceBars = PANEL_CANVAS.map((_, i) => {
+    const wrap = document.createElement('div')
+    wrap.className = 'slice-ctl'
+    wrap.hidden = true
+    wrap.innerHTML = '<input type="range" min="0" max="1" step="1" value="0" title="Percorrer cortes deste painel" /><span class="mono"></span>'
+    stage.appendChild(wrap)
+    const input = wrap.querySelector('input')
+    let held = false
+    input.addEventListener('pointerdown', () => { held = true })
+    window.addEventListener('pointerup', () => { held = false })
+    input.addEventListener('input', () => {
+      const panel = state.panels[i]
+      const axis = VIEW_AXIS[panel?.view]
+      const vol = panel?.nv.volumes[0]
+      if (!vol || axis === undefined) return
+      const dim = vol.dimsRAS?.[axis + 1] || vol.hdr.dims[axis + 1] || 1
+      const f = panel.nv.scene.crosshairPos.slice()
+      f[axis] = (Number(input.value) + 0.5) / dim
+      panel.nv.scene.crosshairPos = f
+      panel.nv.drawScene()
+      propagateCrosshair(panel)
+    })
+    return { wrap, input, label: wrap.querySelector('span'), isHeld: () => held }
+  })
+  const stageR = () => stage.getBoundingClientRect()
+  function tick() {
+    for (let i = 0; i < 4; i++) {
+      const bar = state.sliceBars[i]
+      const panel = state.panels[i]
+      const show = i < state.layout && panel && panel.nv.volumes.length > 0 && VIEW_AXIS[panel.view] !== undefined
+      bar.wrap.hidden = !show
+      if (!show) continue
+      const r = panel.canvas.getBoundingClientRect(), sr = stageR()
+      Object.assign(bar.wrap.style, {
+        left: `${r.right - sr.left - 22}px`, top: `${r.top - sr.top + 8}px`, height: `${Math.max(60, r.height - 40)}px`,
+      })
+      const axis = VIEW_AXIS[panel.view]
+      const vol = panel.nv.volumes[0]
+      const dim = vol.dimsRAS?.[axis + 1] || vol.hdr.dims[axis + 1] || 1
+      const vox = Math.min(dim - 1, Math.max(0, Math.round(panel.nv.scene.crosshairPos[axis] * dim - 0.5)))
+      bar.input.max = dim - 1
+      if (!bar.isHeld()) bar.input.value = vox
+      bar.label.textContent = `${vox + 1}/${dim}`
+    }
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+}
+
+/** Abre uma série num painel novo (Ctrl+clique na miniatura). */
+async function openInNewPanel(id) {
+  if (state.layout < 4) {
+    const n = state.layout + 1
+    await setLayout(n)
+    await loadIntoPanel(n - 1, id)
+    focusPanel(n - 1)
+  } else {
+    const t = state.focus > 0 ? state.focus : 1
+    await loadIntoPanel(t, id)
+  }
+}
+
 const TOOL_MODES = {
   crosshair: DRAG_MODE.crosshair,
   windowing: DRAG_MODE.windowing,
@@ -211,28 +474,37 @@ const TOOL_MODES = {
 }
 const MOUSE_LABEL = { left: 'E', right: 'D', middle: 'M' } // esquerdo · direito · meio
 
-/** Associa uma ferramenta a um botão do mouse (left/right/middle). */
-function assignTool(button, tool) {
-  if (!(tool in TOOL_MODES) || !(button in MOUSE_LABEL)) return
-  state.mouse[button] = tool
+/** Associa uma ação a um gesto do mouse (validando o que o gesto suporta). */
+function assignTool(gesture, action) {
+  const g = GESTURES.find((x) => x.key === gesture)
+  if (!g || !(action in ACTIONS)) return
+  if (g.emulOnly && !ACTIONS[action].emul) { log(`${ACTIONS[action].label} não é possível nesse botão.`); return }
+  state.mouse[gesture] = action
   applyMouseConfig()
   const names = { left: 'esquerdo', right: 'direito', middle: 'do meio' }
-  const btnEl = document.querySelector(`.tool[data-tool="${tool}"]`)
-  log(`${btnEl ? btnEl.textContent.replace(/\s*[EDM·\s]+$/, '') : tool} no botão ${names[button]} do mouse.`)
+  if (names[gesture]) log(`${ACTIONS[action].label} no botão ${names[gesture]} do mouse.`)
 }
 
 function applyMouseConfig() {
+  const m = state.mouse
+  // gesto custom (browse/zoom) é interceptado antes do NiiVue; para o motor,
+  // cai em crosshair — que no painel 3D preserva a rotação padrão por arrasto
+  const nvMode = (a) => (ACTIONS[a]?.native ? TOOL_MODES[a] : DRAG_MODE.crosshair)
   for (const nv of state.panels.filter(Boolean).map((p) => p.nv)) {
-    nv.opts.dragModePrimary = TOOL_MODES[state.mouse.left]
-    nv.opts.dragMode = TOOL_MODES[state.mouse.right]
+    nv.opts.dragModePrimary = nvMode(m.left)
+    nv.opts.dragMode = nvMode(m.right)
     nv.opts.mouseEventConfig = {
-      leftButton: { primary: TOOL_MODES[state.mouse.left] },
-      rightButton: TOOL_MODES[state.mouse.right],
-      centerButton: TOOL_MODES[state.mouse.middle],
+      leftButton: {
+        primary: nvMode(m.left),
+        withCtrl: ACTIONS[m.ctrlLeft]?.native ? TOOL_MODES[m.ctrlLeft] : undefined,
+        withShift: ACTIONS[m.shiftLeft]?.native ? TOOL_MODES[m.shiftLeft] : undefined,
+      },
+      rightButton: nvMode(m.right),
+      centerButton: nvMode(m.middle),
     }
   }
   document.querySelectorAll('.tool[data-tool]').forEach((b) => {
-    const letters = Object.keys(state.mouse)
+    const letters = ['left', 'right', 'middle']
       .filter((k) => state.mouse[k] === b.dataset.tool)
       .map((k) => MOUSE_LABEL[k])
     let chip = b.querySelector('.mb')
@@ -241,6 +513,9 @@ function applyMouseConfig() {
     chip.hidden = !letters.length
     b.classList.toggle('active', letters.length > 0)
   })
+  // espelha nos seletores do diálogo de atalhos, se já montado
+  document.querySelectorAll('#dlgHelp select[data-gesture]').forEach((s) => { s.value = state.mouse[s.dataset.gesture] })
+  saveMouse()
 }
 
 function setView(view) {
@@ -342,10 +617,14 @@ async function addSeries(entries) {
       <span class="th-cap"><strong title="${title}">${title}</strong>
       <span>${mod ? `<span class="badge">${mod}</span>` : ''}<span class="dims mono"></span></span></span>
     </div>`
-    // clique: abre no painel focado (principal ou de comparação); clique direito: manda para comparação
-    item.onclick = () => (state.focus > 0 ? loadIntoPanel(state.focus, e.id) : openSeries(e.id))
+    // clique: abre no painel focado; Ctrl+clique: abre em painel novo; clique direito: comparar
+    item.onclick = (ev) => {
+      if (ev.ctrlKey || ev.metaKey) { openInNewPanel(e.id); return }
+      if (state.focus > 0) loadIntoPanel(state.focus, e.id)
+      else openSeries(e.id)
+    }
     item.oncontextmenu = (ev) => { ev.preventDefault(); compareSeries(e.id) }
-    item.title = `${sc.SeriesDescription || e.file.name} — clique: abrir no painel focado · clique direito: comparar`
+    item.title = `${sc.SeriesDescription || e.file.name} — clique: abrir no painel focado · Ctrl+clique: novo painel · clique direito: comparar`
     $('seriesList').appendChild(item)
     makeThumb(e.file).then(({ canvas, hdr }) => {
       item.querySelector('.ph').replaceWith(canvas)
@@ -599,6 +878,26 @@ function bind() {
   })
   document.querySelectorAll('.tool[data-view]').forEach((b) => (b.onclick = () => setView(b.dataset.view)))
 
+  // diálogo de atalhos/tutorial (?) — os seletores editam os gestos ao vivo
+  const tbody = $('gestureRows')
+  tbody.innerHTML = GESTURES.map((g) => {
+    const opts = Object.entries(ACTIONS)
+      .filter(([, a]) => !g.emulOnly || a.emul)
+      .map(([k, a]) => `<option value="${k}">${a.label}</option>`).join('')
+    return `<tr><td>${g.label}</td><td><select data-gesture="${g.key}">${opts}</select></td></tr>`
+  }).join('')
+  tbody.querySelectorAll('select[data-gesture]').forEach((s) => {
+    s.value = state.mouse[s.dataset.gesture]
+    s.onchange = () => assignTool(s.dataset.gesture, s.value)
+  })
+  $('btnHelp').onclick = () => { applyMouseConfig(); $('dlgHelp').showModal() }
+  $('btnHelpClose').onclick = () => $('dlgHelp').close()
+  $('btnMouseDefaults').onclick = () => {
+    state.mouse = { ...MOUSE_DEFAULTS }
+    applyMouseConfig()
+    log('Gestos do mouse restaurados ao padrão.')
+  }
+
   document.querySelectorAll('.tool[data-layout]').forEach((b) => (b.onclick = async () => {
     const n = Number(b.dataset.layout)
     if (n > 1 && !state.series.length) { log('Abra ao menos uma série antes de comparar.'); return }
@@ -687,6 +986,7 @@ state.roi = createRoiTool({
   log,
 })
 bind()
+buildSliceBars()
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {})
 }
