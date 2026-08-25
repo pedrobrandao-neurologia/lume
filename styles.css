@@ -127,10 +127,14 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 
 /* palco */
 .stage { position: relative; min-width: 0; min-height: 0; background: #000; }
-#gl, #gl2 { width: 100%; height: 100%; display: block; touch-action: none; background: #000; }
-/* comparação lado a lado: dois visualizadores sincronizados */
-.stage.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--line); }
-.stage.split #gl, .stage.split #gl2 { min-width: 0; min-height: 0; }
+#gl, #gl2, #gl3, #gl4 { width: 100%; height: 100%; display: block; touch-action: none; background: #000; min-width: 0; min-height: 0; }
+#gl2[hidden], #gl3[hidden], #gl4[hidden] { display: none; } /* hidden vence o display:block acima */
+/* comparação: 2–4 visualizadores sincronizados, cada um com série e corte próprios */
+.stage.layout-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--line); }
+.stage.layout-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; background: var(--line); }
+.stage.layout-4 { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; background: var(--line); }
+/* painel focado: recebe as miniaturas clicadas e as trocas de corte */
+.stage canvas.focused { outline: 1.5px solid var(--amber); outline-offset: -1.5px; }
 /* overlay das ROIs — cobre exatamente o canvas do painel esquerdo */
 #roiOverlay { position: absolute; left: 0; top: 0; z-index: 4; pointer-events: none; }
 .dropzone { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; }

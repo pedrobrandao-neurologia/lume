@@ -38,7 +38,13 @@
       <button class="tool view" data-view="coronal">Cor</button>
       <button class="tool view" data-view="sagittal">Sag</button>
       <button class="tool view" data-view="render" title="Reconstrução volumétrica">3D</button>
-      <button class="tool" id="btnCompare" title="Comparar duas séries lado a lado com cursor e scroll sincronizados (clique direito numa miniatura escolhe a série do painel direito)">⇄ Comparar</button>
+    </div>
+    <div class="tool-group" role="group" aria-label="Painéis"
+         title="Nº de painéis sincronizados em mm. Cada painel pode ter série e corte próprios (ex.: coluna em axial, sagital e coronal). Clique num painel para focá-lo: a miniatura clicada e os botões Ax/Cor/Sag valem para o painel focado.">
+      <button class="tool active" data-layout="1" title="Painel único">▣</button>
+      <button class="tool" data-layout="2" title="2 painéis lado a lado">◫</button>
+      <button class="tool" data-layout="3" title="3 painéis">☰3</button>
+      <button class="tool" data-layout="4" title="4 painéis (2×2)">⊞</button>
     </div>
     <div class="tool-group">
       <button class="tool" id="btnReset" title="Restaurar zoom, janela e posição">Restaurar</button>
@@ -75,6 +81,8 @@
     </div>
     <canvas id="gl"></canvas>
     <canvas id="gl2" hidden></canvas>
+    <canvas id="gl3" hidden></canvas>
+    <canvas id="gl4" hidden></canvas>
     <canvas id="roiOverlay"></canvas>
     <div class="progressbar" id="progress" hidden><div id="progressFill"></div></div>
   </main>
