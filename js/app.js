@@ -5,17 +5,20 @@
 import { Niivue, NVImage, DRAG_MODE } from '../vendor/niivue.min.js'
 import { ingest, filesFromDrop } from './ingest.js'
 import { makeThumb } from './thumbs.js'
-import { slabMip, axisLabels } from './mip.js'
+import { slabProject, axisLabels } from './mip.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 const state = {
   nv: null,
+  nv2: null,           // segundo visualizador (comparação lado a lado)
+  compare: false,
+  rightId: null,       // série exibida no painel direito
   series: [],          // SeriesEntry[]
   activeId: null,
   vol: null,           // NVImage original da série ativa
-  mipVol: null,        // NVImage derivado (slab MIP), quando ativo
+  mipVol: null,        // NVImage derivado (thick slab), quando ativo
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
   // ferramenta associada a cada botão do mouse, como numa workstation
@@ -60,6 +63,75 @@ async function initViewer() {
   applyMouseConfig()
 }
 
+/* ---------------- comparação lado a lado ---------------- */
+async function ensureCompareViewer() {
+  if (state.nv2) return state.nv2
+  const nv2 = new Niivue({
+    backColor: [0, 0, 0, 1],
+    crosshairColor: [0.31, 0.7, 0.75, 0.9], // teal: distingue o painel de comparação
+    show3Dcrosshair: true,
+    dragAndDropEnabled: false,
+    multiplanarForceRender: false,
+  })
+  await nv2.attachToCanvas($('gl2'))
+  nv2.setSliceType(nv2.sliceTypeMultiplanar)
+  nv2.opts.yoke3Dto2DZoom = true
+  state.nv2 = nv2
+  applyMouseConfig()
+  // sincronização bidirecional em mm: cursor, scroll de cortes, pan/zoom e câmera 3D
+  state.nv.broadcastTo(nv2, { '2d': true, '3d': true })
+  nv2.broadcastTo(state.nv, { '2d': true, '3d': true })
+  return nv2
+}
+
+async function setCompare(on) {
+  if (on === state.compare) return
+  state.compare = on
+  $('btnCompare').classList.toggle('active', on)
+  $('stage').classList.toggle('split', on)
+  $('gl2').hidden = !on
+  if (on) await ensureCompareViewer()
+  // o ResizeObserver do NiiVue reage à mudança de layout; força um quadro por garantia
+  requestAnimationFrame(() => {
+    try { state.nv.drawScene(); state.nv2?.drawScene() } catch { /* canvas ainda sem tamanho */ }
+  })
+  markActiveThumbs()
+  if (!on) log('Comparação encerrada.')
+}
+
+async function compareSeries(id) {
+  const entry = state.series.find((s) => s.id === id)
+  if (!entry) return
+  if (!state.compare) await setCompare(true)
+  log(`Comparando com ${entry.file.name}…`); progress(0.3)
+  try {
+    let vol = await volumeFor(entry)
+    // mesma série nos dois painéis: clona para não compartilhar o NVImage entre contextos GL
+    if (state.nv.volumes.includes(vol)) vol = vol.clone()
+    const nv2 = state.nv2
+    while (nv2.volumes.length) nv2.removeVolume(nv2.volumes[0])
+    await nv2.addVolume(vol)
+    state.rightId = id
+    const v = nv2.volumes[0]
+    if (entry.sidecar.Modality === 'CT') { v.cal_min = 0; v.cal_max = 80 }
+    else { v.cal_min = v.robust_min ?? v.global_min; v.cal_max = v.robust_max ?? v.global_max }
+    nv2.updateGLVolume()
+    markActiveThumbs()
+    progress(0)
+    log(`Comparando: ${entry.file.name} à direita — cursor e scroll sincronizados em mm.`)
+  } catch (err) {
+    console.error(err); progress(0)
+    log('Falha na comparação: ' + err.message)
+  }
+}
+
+function markActiveThumbs() {
+  document.querySelectorAll('.thumb').forEach((t) => {
+    t.classList.toggle('active', t.id === `th-${state.activeId}`)
+    t.classList.toggle('active-cmp', state.compare && t.id === `th-${state.rightId}`)
+  })
+}
+
 const TOOL_MODES = {
   crosshair: DRAG_MODE.crosshair,
   windowing: DRAG_MODE.windowing,
@@ -80,13 +152,14 @@ function assignTool(button, tool) {
 }
 
 function applyMouseConfig() {
-  const nv = state.nv
-  nv.opts.dragModePrimary = TOOL_MODES[state.mouse.left]
-  nv.opts.dragMode = TOOL_MODES[state.mouse.right]
-  nv.opts.mouseEventConfig = {
-    leftButton: { primary: TOOL_MODES[state.mouse.left] },
-    rightButton: TOOL_MODES[state.mouse.right],
-    centerButton: TOOL_MODES[state.mouse.middle],
+  for (const nv of [state.nv, state.nv2].filter(Boolean)) {
+    nv.opts.dragModePrimary = TOOL_MODES[state.mouse.left]
+    nv.opts.dragMode = TOOL_MODES[state.mouse.right]
+    nv.opts.mouseEventConfig = {
+      leftButton: { primary: TOOL_MODES[state.mouse.left] },
+      rightButton: TOOL_MODES[state.mouse.right],
+      centerButton: TOOL_MODES[state.mouse.middle],
+    }
   }
   document.querySelectorAll('.tool[data-tool]').forEach((b) => {
     const letters = Object.keys(state.mouse)
@@ -101,12 +174,13 @@ function applyMouseConfig() {
 }
 
 function setView(view) {
-  const nv = state.nv
-  const t = {
-    mpr: nv.sliceTypeMultiplanar, axial: nv.sliceTypeAxial,
-    coronal: nv.sliceTypeCoronal, sagittal: nv.sliceTypeSagittal, render: nv.sliceTypeRender,
-  }[view]
-  nv.setSliceType(t)
+  for (const nv of [state.nv, state.nv2].filter(Boolean)) {
+    const t = {
+      mpr: nv.sliceTypeMultiplanar, axial: nv.sliceTypeAxial,
+      coronal: nv.sliceTypeCoronal, sagittal: nv.sliceTypeSagittal, render: nv.sliceTypeRender,
+    }[view]
+    nv.setSliceType(t)
+  }
   $('panel3d').hidden = view !== 'render'
   if (view === 'render') applyIllumination()
   document.querySelectorAll('.tool[data-view]').forEach((b) =>
@@ -201,6 +275,8 @@ async function addSeries(entries) {
       <span>${mod ? `<span class="badge">${mod}</span>` : ''}<span class="dims mono"></span></span></span>
     </div>`
     item.onclick = () => openSeries(e.id)
+    item.oncontextmenu = (ev) => { ev.preventDefault(); compareSeries(e.id) }
+    item.title = `${sc.SeriesDescription || e.file.name} — clique: abrir · clique direito: comparar lado a lado`
     $('seriesList').appendChild(item)
     makeThumb(e.file).then(({ canvas, hdr }) => {
       item.querySelector('.ph').replaceWith(canvas)
@@ -211,21 +287,29 @@ async function addSeries(entries) {
   $('stripCount').textContent = state.series.length
 }
 
+/** Carrega (ou reaproveita do cache) o NVImage de uma série. */
+async function volumeFor(entry) {
+  let vol = state.cache.get(entry.id)
+  if (!vol) {
+    vol = await NVImage.loadFromFile({ file: entry.file, name: entry.file.name })
+    state.cache.set(entry.id, vol)
+    // limita o cache para conter a memória, preservando os painéis em exibição
+    for (const k of state.cache.keys()) {
+      if (state.cache.size <= 4) break
+      if (k !== entry.id && k !== state.activeId && k !== state.rightId) state.cache.delete(k)
+    }
+  }
+  return vol
+}
+
 async function openSeries(id) {
   const entry = state.series.find((s) => s.id === id)
   if (!entry) return
   log(`Abrindo ${entry.file.name}…`); progress(0.3)
   try {
-    let vol = state.cache.get(id)
-    if (!vol) {
-      vol = await NVImage.loadFromFile({ file: entry.file, name: entry.file.name })
-      state.cache.set(id, vol)
-      // limita o cache a 3 volumes para conter a memória
-      for (const k of state.cache.keys()) {
-        if (state.cache.size <= 3) break
-        if (k !== id) state.cache.delete(k)
-      }
-    }
+    let vol = await volumeFor(entry)
+    // mesma série nos dois painéis: clona para não compartilhar o NVImage entre contextos GL
+    if (state.nv2?.volumes.includes(vol)) vol = vol.clone()
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
     await nv.addVolume(vol)
@@ -234,7 +318,7 @@ async function openSeries(id) {
     state.activeId = id
     $('btnMipOff').hidden = true
     $('dropzone').classList.add('hidden')
-    document.querySelectorAll('.thumb').forEach((t) => t.classList.toggle('active', t.id === `th-${id}`))
+    markActiveThumbs()
 
     // janela inicial: preset de crânio em TC, percentis robustos no resto
     const isCT = entry.sidecar.Modality === 'CT'
@@ -288,22 +372,24 @@ async function applyMip() {
   const vol = state.vol
   if (!vol) return
   const axis = Number($('mipAxis').value)
+  const mode = $('mipMode').value
+  const label = { max: 'MIP', min: 'MinIP', mean: 'Média' }[mode] || 'MIP'
   const mm = Math.max(1, Number($('mipMM').value) || 12)
   const pd = Math.abs(vol.hdr.pixDims[axis + 1]) || 1
   const slabVox = Math.max(1, Math.round(mm / pd))
-  log(`Calculando MIP (${mm} mm ≈ ${slabVox} voxels)…`); progress(0.4)
+  log(`Calculando ${label} (${mm} mm ≈ ${slabVox} voxels)…`); progress(0.4)
   await new Promise((r) => setTimeout(r)) // deixa a barra pintar antes do laço pesado
   try {
     const dims = vol.hdr.dims.slice(1, 4)
     // volumes 4D: projeta apenas o primeiro volume temporal
     const nvox = dims[0] * dims[1] * dims[2]
     const src = vol.img.length > nvox ? vol.img.subarray(0, nvox) : vol.img
-    const out = slabMip(src, dims, axis, slabVox)
+    const out = slabProject(src, dims, axis, slabVox, mode)
     const mip = vol.clone()
     mip.zeroImage()
     mip.img = out
     if (mip.hdr.dims[0] >= 4) { mip.hdr.dims[0] = 3; mip.hdr.dims[4] = 1 }
-    mip.name = `MIP ${mm}mm — ${vol.name}`
+    mip.name = `${label} ${mm}mm — ${vol.name}`
     mip.cal_min = vol.cal_min; mip.cal_max = vol.cal_max
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
@@ -311,9 +397,9 @@ async function applyMip() {
     state.mipVol = mip
     $('btnMipOff').hidden = false
     progress(0)
-    log(`MIP de ${mm} mm aplicado — “Voltar ao original” desfaz.`)
+    log(`${label} de ${mm} mm aplicado — “Original” desfaz.`)
   } catch (err) {
-    console.error(err); progress(0); log('MIP falhou: ' + err.message)
+    console.error(err); progress(0); log(`${label} falhou: ` + err.message)
   }
 }
 
@@ -362,6 +448,17 @@ function bind() {
   })
   document.querySelectorAll('.tool[data-view]').forEach((b) => (b.onclick = () => setView(b.dataset.view)))
 
+  $('btnCompare').onclick = async () => {
+    if (!state.series.length) { log('Abra ao menos uma série antes de comparar.'); return }
+    if (state.compare) { setCompare(false); return }
+    await setCompare(true)
+    if (!state.rightId) {
+      // sugere a próxima série do estudo (ou repete a ativa, se for a única)
+      const other = state.series.find((s) => s.id !== state.activeId) || state.series[0]
+      await compareSeries(other.id)
+    }
+  }
+
   $('btnDicomDir').onclick = () => $('inDicomDir').click()
   $('btnFiles').onclick = () => $('inFiles').click()
   $('inDicomDir').onchange = (e) => { handleFiles(e.target.files); e.target.value = '' }
@@ -398,17 +495,29 @@ function bind() {
 
   $('btnClearMeasures').onclick = () => { state.measures = []; renderMeasures() }
   $('btnReset').onclick = () => {
-    const nv = state.nv
-    nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+    for (const nv of [state.nv, state.nv2].filter(Boolean)) {
+      nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+      nv.drawScene()
+    }
     autoWindow()
-    nv.drawScene()
   }
   $('btnShot').onclick = () => state.nv.saveScene(`lume-${Date.now()}.png`)
 
   window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return
     const k = e.key.toLowerCase()
     const map = { c: 'crosshair', j: 'windowing', m: 'measurement', a: 'angle', v: 'pan' }
-    if (map[k] && !e.metaKey && !e.ctrlKey && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) assignTool('left', map[k])
+    if (map[k]) { assignTool('left', map[k]); return }
+    // presets de janela pelo teclado: 1–7 aplica o preset de TC, 0 = janela automática
+    if (k === '0') { autoWindow(); log('Janela automática.'); return }
+    if (/^[1-7]$/.test(k) && !$('ctPresets').hidden) {
+      const b = document.querySelectorAll('#ctPresets button')[Number(k) - 1]
+      if (b) {
+        applyWindow(Number(b.dataset.wl), Number(b.dataset.ww))
+        log(`Janela: ${b.textContent.replace(/\s*\d\s*$/, '')} (C ${b.dataset.wl} / L ${b.dataset.ww}).`)
+      }
+    }
   })
 }
 
@@ -418,5 +527,5 @@ bind()
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {})
 }
-window.lume = { state, openSeries, handleFiles, VERSION } // acesso programático / testes
+window.lume = { state, openSeries, compareSeries, setCompare, handleFiles, VERSION } // acesso programático / testes
 log(`Lume v${VERSION} — pronto. Abra uma pasta DICOM, NIfTI ou ZIP.`)
