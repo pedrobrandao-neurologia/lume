@@ -6,9 +6,11 @@ import { Niivue, NVImage, DRAG_MODE } from '../vendor/niivue.min.js'
 import { ingest, filesFromDrop } from './ingest.js'
 import { makeThumb } from './thumbs.js'
 import { slabProject, axisLabels } from './mip.js'
+import { createRoiTool } from './roi.js'
+import { bakeOblique } from './oblique.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.3.0'
+const VERSION = '0.4.0'
 
 const state = {
   nv: null,
@@ -17,8 +19,10 @@ const state = {
   rightId: null,       // série exibida no painel direito
   series: [],          // SeriesEntry[]
   activeId: null,
-  vol: null,           // NVImage original da série ativa
+  vol: null,           // NVImage base em exibição (original ou oblíquo)
+  origVol: null,       // NVImage original da série ativa (p/ desfazer o oblíquo)
   mipVol: null,        // NVImage derivado (thick slab), quando ativo
+  roi: null,           // controlador de ROIs
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
   // ferramenta associada a cada botão do mouse, como numa workstation
@@ -314,9 +318,12 @@ async function openSeries(id) {
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
     await nv.addVolume(vol)
     state.vol = vol
+    state.origVol = vol
     state.mipVol = null
     state.activeId = id
     $('btnMipOff').hidden = true
+    $('btnObliqueOff').hidden = true
+    state.roi?.clear()
     $('dropzone').classList.add('hidden')
     markActiveThumbs()
 
@@ -414,6 +421,83 @@ async function removeMip() {
   log('Volume original restaurado.')
 }
 
+/* ---------------- MPR oblíquo ---------------- */
+async function applyOblique() {
+  const src = state.origVol
+  if (!src) return
+  const degLR = Number($('obLR').value) || 0
+  const degAP = Number($('obAP').value) || 0
+  const degSI = Number($('obSI').value) || 0
+  if (!degLR && !degAP && !degSI) { removeOblique(); return }
+  const centerMM = state.nv.frac2mm(state.nv.scene.crosshairPos)
+  log(`Reformatando oblíquo (${degLR}°/${degAP}°/${degSI}°)…`)
+  try {
+    const out = await bakeOblique(src, {
+      degLR, degAP, degSI,
+      centerMM: [centerMM[0], centerMM[1], centerMM[2]],
+      onProgress: (p) => progress(Math.max(0.02, p * 0.98)),
+    })
+    const ob = src.clone()
+    ob.zeroImage()
+    ob.img = out
+    if (ob.hdr.dims[0] >= 4) { ob.hdr.dims[0] = 3; ob.hdr.dims[4] = 1 }
+    ob.name = `Oblíquo ${degLR}/${degAP}/${degSI}° — ${src.name}`
+    ob.cal_min = state.nv.volumes[0]?.cal_min ?? src.cal_min
+    ob.cal_max = state.nv.volumes[0]?.cal_max ?? src.cal_max
+    const nv = state.nv
+    while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
+    await nv.addVolume(ob)
+    state.vol = ob        // o thick slab passa a operar sobre o oblíquo
+    state.mipVol = null
+    $('btnMipOff').hidden = true
+    $('btnObliqueOff').hidden = false
+    state.roi?.clear()    // as ROIs valem para a grade em exibição
+    progress(0)
+    log(`Oblíquo aplicado (L–R ${degLR}° · A–P ${degAP}° · S–I ${degSI}°, em torno do cursor) — “Original” desfaz.`)
+  } catch (err) {
+    console.error(err); progress(0)
+    log('Oblíquo falhou: ' + err.message)
+  }
+}
+
+async function removeOblique() {
+  if (!state.origVol) return
+  const nv = state.nv
+  while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
+  await nv.addVolume(state.origVol)
+  state.vol = state.origVol
+  state.mipVol = null
+  $('btnMipOff').hidden = true
+  $('btnObliqueOff').hidden = true
+  state.roi?.clear()
+  syncWindowInputs()
+  log('Volume original restaurado.')
+}
+
+/* ---------------- ROIs ---------------- */
+function renderRoiList(rois, selected) {
+  const ol = $('roiList')
+  if (!rois.length) { ol.innerHTML = '<li class="empty">Nenhuma ROI ainda.</li>'; return }
+  ol.innerHTML = rois.map((r, i) => {
+    const s = r.stats
+    const kind = r.kind === 'ellipse' ? 'elipse' : 'laço'
+    const area = s.areaMM >= 100 ? `${fmt(s.areaMM / 100, 2)} cm²` : `${fmt(s.areaMM, 1)} mm²`
+    return `<li class="${i === selected ? 'sel' : ''}" data-roi="${i}" title="clique para selecionar · Del remove">` +
+      `<strong>${i + 1}</strong> ${kind} · média ${fmt(s.mean, 1)} · DP ${fmt(s.sd, 1)}` +
+      `<br />mín ${fmt(s.min, 1)} · máx ${fmt(s.max, 1)} · ${area}</li>`
+  }).join('')
+  ol.querySelectorAll('li[data-roi]').forEach((li) =>
+    (li.onclick = () => state.roi.select(Number(li.dataset.roi))))
+}
+
+function armRoi(kind) {
+  const armed = state.roi.arm(kind)
+  $('toolRoiEllipse').classList.toggle('armed', armed === 'ellipse')
+  $('toolRoiLasso').classList.toggle('armed', armed === 'lasso')
+  if (armed === 'ellipse') log('ROI elíptica: arraste no painel esquerdo. Esc sai.')
+  else if (armed === 'lasso') log('Laço: arraste o traçado — ou use as setas + Espaço (Enter fecha). Esc sai.')
+}
+
 /* ---------------- 3D ---------------- */
 function applyIllumination() {
   if (state.nv.volumes.length) state.nv.setVolumeRenderIllumination(Number($('illum').value))
@@ -487,6 +571,12 @@ function bind() {
 
   $('btnMip').onclick = applyMip
   $('btnMipOff').onclick = removeMip
+  $('btnOblique').onclick = applyOblique
+  $('btnObliqueOff').onclick = () => { $('obLR').value = $('obAP').value = $('obSI').value = 0; removeOblique() }
+
+  $('toolRoiEllipse').onclick = () => armRoi('ellipse')
+  $('toolRoiLasso').onclick = () => armRoi('lasso')
+  $('btnClearRois').onclick = () => state.roi.clear()
   $('illum').onchange = applyIllumination
   $('clip').oninput = () => {
     const d = Number($('clip').value)
@@ -509,6 +599,8 @@ function bind() {
     const k = e.key.toLowerCase()
     const map = { c: 'crosshair', j: 'windowing', m: 'measurement', a: 'angle', v: 'pan' }
     if (map[k]) { assignTool('left', map[k]); return }
+    if (k === 'e') { armRoi('ellipse'); return }
+    if (k === 'l') { armRoi('lasso'); return }
     // presets de janela pelo teclado: 1–7 aplica o preset de TC, 0 = janela automática
     if (k === '0') { autoWindow(); log('Janela automática.'); return }
     if (/^[1-7]$/.test(k) && !$('ctPresets').hidden) {
@@ -523,6 +615,15 @@ function bind() {
 
 /* ---------------- inicialização ---------------- */
 await initViewer()
+state.roi = createRoiTool({
+  nv: state.nv,
+  overlay: $('roiOverlay'),
+  glCanvas: $('gl'),
+  getVol: () => state.nv.volumes[0] || null,
+  onChange: renderRoiList,
+  isMagnet: () => $('roiMagnet').checked,
+  log,
+})
 bind()
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {})

@@ -71,6 +71,8 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
   vertical-align: 1px;
 }
 .tools-hint { align-self: center; margin-left: 6px; font: 500 10.5px var(--mono); color: var(--dim); cursor: help; }
+/* ferramenta de ROI armada (modal): âmbar, como as próprias ROIs */
+.tool.armed { background: var(--surface-2); border-color: var(--amber); color: var(--amber); }
 
 /* ---------- área de trabalho ---------- */
 .workspace { flex: 1; display: grid; grid-template-columns: 216px 1fr 268px; min-height: 0; }
@@ -129,6 +131,8 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 /* comparação lado a lado: dois visualizadores sincronizados */
 .stage.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; background: var(--line); }
 .stage.split #gl, .stage.split #gl2 { min-width: 0; min-height: 0; }
+/* overlay das ROIs — cobre exatamente o canvas do painel esquerdo */
+#roiOverlay { position: absolute; left: 0; top: 0; z-index: 4; pointer-events: none; }
 .dropzone { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; }
 .dropzone.hidden { display: none; }
 .dropzone.hover .dz-card { border-color: var(--amber); }
@@ -159,6 +163,11 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 .rangeRow input[type=range] { padding: 0; accent-color: var(--teal); }
 .measures { margin: 0; padding-left: 20px; font-size: 12.5px; max-height: 130px; overflow-y: auto; }
 .measures li { margin-bottom: 2px; color: var(--amber); }
+#roiList li { cursor: pointer; color: var(--ink); line-height: 1.5; }
+#roiList li.sel { color: var(--amber); }
+#roiList li strong { color: var(--amber); }
+.check { flex-direction: row; align-items: center; gap: 6px; margin-bottom: 8px; }
+.check input { width: auto; accent-color: var(--teal); }
 .measures .empty, .meta .empty { color: var(--dim); list-style: none; margin-left: -20px; }
 .meta { margin: 0; font-size: 12px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
 .meta dt { color: var(--dim); }
