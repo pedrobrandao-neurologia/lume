@@ -177,6 +177,35 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 .meta dt { color: var(--dim); }
 .meta dd { margin: 0; word-break: break-word; }
 
+/* barra de cortes por painel (vertical, borda direita de cada painel) */
+.slice-ctl {
+  position: absolute; z-index: 4; width: 20px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+.slice-ctl input[type=range] {
+  flex: 1; width: 14px; padding: 0; margin: 0;
+  writing-mode: vertical-rl; direction: rtl;
+  accent-color: var(--amber); background: transparent; border: 0;
+  cursor: ns-resize; opacity: 0.55;
+}
+.slice-ctl:hover input[type=range] { opacity: 1; }
+.slice-ctl span { font-size: 9.5px; color: var(--dim); background: rgba(10,12,14,.7); padding: 0 3px; border-radius: 3px; }
+
+/* diálogo de tutorial/atalhos */
+#dlgHelp {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 18px 20px; max-width: 46rem; width: min(92vw, 46rem);
+  max-height: 86vh; overflow-y: auto; scrollbar-width: thin;
+}
+#dlgHelp::backdrop { background: rgba(0, 0, 0, 0.6); }
+#dlgHelp h2 { margin: 0 0 6px; font: 600 17px var(--disp); }
+#dlgHelp h3 { margin: 14px 0 6px; font: 600 12px var(--disp); text-transform: uppercase; letter-spacing: 0.08em; color: var(--teal); }
+.help-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.help-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.help-table td:first-child { color: var(--dim); white-space: nowrap; width: 46%; }
+.help-table select { padding: 3px 6px; width: auto; min-width: 200px; }
+#btnHelp { font-weight: 700; }
+
 /* barra de status */
 .statusbar {
   display: flex; gap: 18px; align-items: center; padding: 5px 14px;

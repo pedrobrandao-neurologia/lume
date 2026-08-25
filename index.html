@@ -46,6 +46,7 @@
       <button class="tool" data-layout="3" title="3 painéis">☰3</button>
       <button class="tool" data-layout="4" title="4 painéis (2×2)">⊞</button>
     </div>
+    <button class="tool" id="btnHelp" title="Tutorial e atalhos do mouse/teclado (customizáveis)">?</button>
     <div class="tool-group">
       <button class="tool" id="btnReset" title="Restaurar zoom, janela e posição">Restaurar</button>
       <button class="tool" id="btnShot" title="Salvar captura da tela atual (PNG)">Captura</button>
@@ -190,6 +191,54 @@
   <span id="statusLoc" class="mono"></span>
   <span id="statusMsg">pronto — abra uma pasta DICOM, NIfTI ou ZIP</span>
 </footer>
+
+<dialog id="dlgHelp" aria-label="Tutorial e atalhos">
+  <h2>Tutorial — mouse e teclado</h2>
+  <p class="hint">O Lume funciona como uma workstation: cada gesto do mouse tem uma ação, e você pode
+    trocá-las abaixo (a escolha fica salva neste navegador). Um clique simples com o botão esquerdo
+    posiciona o cursor — que é sincronizado em mm entre os painéis de comparação.</p>
+
+  <h3>Gestos do mouse (personalizáveis)</h3>
+  <table class="help-table"><tbody id="gestureRows"></tbody></table>
+  <p class="hint">Medir distância/ângulo dependem do motor de imagem e por isso só estão disponíveis nos
+    botões esquerdo, do meio, direito e em Ctrl/Shift+esquerdo. No painel 3D, o arrasto com o botão
+    esquerdo gira o volume.</p>
+
+  <h3>Roda do mouse</h3>
+  <table class="help-table"><tbody>
+    <tr><td>Roda vertical</td><td>Percorre os cortes do painel sob o mouse (cada painel tem também uma barra de rolagem própria)</td></tr>
+    <tr><td>Ctrl + roda</td><td>Zoom</td></tr>
+    <tr><td>Roda horizontal</td><td>Série anterior / seguinte no painel sob o mouse</td></tr>
+  </tbody></table>
+
+  <h3>Miniaturas (faixa à esquerda)</h3>
+  <table class="help-table"><tbody>
+    <tr><td>Clique</td><td>Abre a série no painel focado</td></tr>
+    <tr><td>Ctrl + clique</td><td>Abre a série em um painel novo</td></tr>
+    <tr><td>Clique direito</td><td>Manda a série para o painel de comparação</td></tr>
+  </tbody></table>
+
+  <h3>Teclado</h3>
+  <table class="help-table"><tbody>
+    <tr><td>C · J · M · A · V</td><td>Cursor · Janela · Medir · Ângulo · Mover no botão esquerdo</td></tr>
+    <tr><td>1–7</td><td>Presets de janela de TC (cérebro, subdural, AVC, osso, pulmão, mediastino, abdome)</td></tr>
+    <tr><td>0</td><td>Janela automática</td></tr>
+    <tr><td>E · L</td><td>ROI elíptica · Laço (traçado livre)</td></tr>
+    <tr><td>Setas · Espaço · Enter · Backspace · Esc</td><td>Desenho do laço pelo teclado (Shift acelera as setas)</td></tr>
+    <tr><td>Del</td><td>Remove a ROI selecionada</td></tr>
+  </tbody></table>
+
+  <h3>Painéis de comparação</h3>
+  <p class="hint">Os botões ▣ ◫ ☰3 ⊞ abrem 1 a 4 painéis com o cursor sincronizado em mm. Clique num painel
+    para focá-lo (contorno âmbar); os botões MPR/Ax/Cor/Sag/3D mudam o corte apenas do painel focado — assim
+    dá para ver a mesma lesão em axial, sagital e coronal ao mesmo tempo. As ROIs, a janela por teclado,
+    o thick slab e o MPR oblíquo operam sobre o painel 1 (principal).</p>
+
+  <div class="row" style="margin-top:10px">
+    <button id="btnMouseDefaults">Restaurar padrões do mouse</button>
+    <button id="btnHelpClose" class="primary grow">Fechar</button>
+  </div>
+</dialog>
 
 <script type="module" src="js/app.js"></script>
 </body>
