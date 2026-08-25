@@ -21,12 +21,14 @@
   </div>
 
   <nav class="tools" aria-label="Ferramentas">
-    <div class="tool-group" role="group" aria-label="Interação">
-      <button class="tool active" id="toolCrosshair" data-tool="crosshair" title="Cursor / localizador (arrastar)">✛ Cursor</button>
-      <button class="tool" id="toolWindow" data-tool="windowing" title="Janelamento (arrastar: ← → largura, ↑ ↓ centro)">◐ Janela</button>
-      <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância (arrastar)">⟷ Medir</button>
-      <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo (dois traços)">∠ Ângulo</button>
-      <button class="tool" id="toolPan" data-tool="pan" title="Mover imagem (arrastar)">✥ Mover</button>
+    <div class="tool-group" role="group" aria-label="Interação"
+         title="Clique com o botão do mouse desejado para associar a ferramenta: esquerdo (E), direito (D) ou do meio (M)">
+      <button class="tool active" id="toolCrosshair" data-tool="crosshair" title="Cursor / localizador — clique com o botão do mouse (esq/dir/meio) que deseja usar">✛ Cursor</button>
+      <button class="tool" id="toolWindow" data-tool="windowing" title="Janelamento (← → largura, ↑ ↓ centro) — clique com o botão do mouse que deseja usar">◐ Janela</button>
+      <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância — clique com o botão do mouse que deseja usar">⟷ Medir</button>
+      <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo (dois traços) — clique com o botão do mouse que deseja usar">∠ Ângulo</button>
+      <button class="tool" id="toolPan" data-tool="pan" title="Mover imagem — clique com o botão do mouse que deseja usar">✥ Mover</button>
+      <span class="tools-hint" title="E = botão esquerdo · D = direito · M = do meio">mouse: E·D·M</span>
     </div>
     <div class="tool-group" role="group" aria-label="Corte">
       <button class="tool view active" data-view="mpr" title="Multiplanar">MPR</button>

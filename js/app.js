@@ -8,7 +8,7 @@ import { makeThumb } from './thumbs.js'
 import { slabMip, axisLabels } from './mip.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 
 const state = {
   nv: null,
@@ -18,7 +18,8 @@ const state = {
   mipVol: null,        // NVImage derivado (slab MIP), quando ativo
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
-  tool: 'crosshair',
+  // ferramenta associada a cada botão do mouse, como numa workstation
+  mouse: { left: 'crosshair', right: 'windowing', middle: 'pan' },
 }
 
 /* ---------------- utilidades de interface ---------------- */
@@ -42,34 +43,61 @@ async function initViewer() {
   })
   await nv.attachToCanvas($('gl'))
   nv.setSliceType(nv.sliceTypeMultiplanar)
-  nv.opts.dragMode = DRAG_MODE.windowing // botão direito: janela, como numa workstation
   nv.opts.yoke3Dto2DZoom = true
 
   nv.onLocationChange = (d) => { $('statusLoc').textContent = d?.string || '' }
   nv.onIntensityChange = () => syncWindowInputs()
   $('gl').addEventListener('pointerdown', (e) => { state.lastButton = e.button })
   nv.onDragRelease = (p) => {
-    if (state.tool === 'measurement' && state.lastButton === 0 && p?.mmLength > 0.5) {
+    // registra a medida se o botão solto estava com a ferramenta de medição
+    const btn = { 0: 'left', 1: 'middle', 2: 'right' }[state.lastButton]
+    if (btn && state.mouse[btn] === 'measurement' && p?.mmLength > 0.5) {
       state.measures.push(p.mmLength)
       renderMeasures()
     }
   }
   state.nv = nv
+  applyMouseConfig()
 }
 
-function setTool(tool) {
-  state.tool = tool
+const TOOL_MODES = {
+  crosshair: DRAG_MODE.crosshair,
+  windowing: DRAG_MODE.windowing,
+  measurement: DRAG_MODE.measurement,
+  angle: DRAG_MODE.angle,
+  pan: DRAG_MODE.pan,
+}
+const MOUSE_LABEL = { left: 'E', right: 'D', middle: 'M' } // esquerdo · direito · meio
+
+/** Associa uma ferramenta a um botão do mouse (left/right/middle). */
+function assignTool(button, tool) {
+  if (!(tool in TOOL_MODES) || !(button in MOUSE_LABEL)) return
+  state.mouse[button] = tool
+  applyMouseConfig()
+  const names = { left: 'esquerdo', right: 'direito', middle: 'do meio' }
+  const btnEl = document.querySelector(`.tool[data-tool="${tool}"]`)
+  log(`${btnEl ? btnEl.textContent.replace(/\s*[EDM·\s]+$/, '') : tool} no botão ${names[button]} do mouse.`)
+}
+
+function applyMouseConfig() {
   const nv = state.nv
-  const modes = {
-    crosshair: DRAG_MODE.crosshair,
-    windowing: DRAG_MODE.windowing,
-    measurement: DRAG_MODE.measurement,
-    angle: DRAG_MODE.angle,
-    pan: DRAG_MODE.pan,
+  nv.opts.dragModePrimary = TOOL_MODES[state.mouse.left]
+  nv.opts.dragMode = TOOL_MODES[state.mouse.right]
+  nv.opts.mouseEventConfig = {
+    leftButton: { primary: TOOL_MODES[state.mouse.left] },
+    rightButton: TOOL_MODES[state.mouse.right],
+    centerButton: TOOL_MODES[state.mouse.middle],
   }
-  nv.opts.dragModePrimary = modes[tool] ?? DRAG_MODE.crosshair
-  document.querySelectorAll('.tool[data-tool]').forEach((b) =>
-    b.classList.toggle('active', b.dataset.tool === tool))
+  document.querySelectorAll('.tool[data-tool]').forEach((b) => {
+    const letters = Object.keys(state.mouse)
+      .filter((k) => state.mouse[k] === b.dataset.tool)
+      .map((k) => MOUSE_LABEL[k])
+    let chip = b.querySelector('.mb')
+    if (!chip) { chip = document.createElement('span'); chip.className = 'mb'; b.appendChild(chip) }
+    chip.textContent = letters.join('·')
+    chip.hidden = !letters.length
+    b.classList.toggle('active', letters.length > 0)
+  })
 }
 
 function setView(view) {
@@ -116,6 +144,46 @@ function autoWindow() {
 }
 
 /* ---------------- séries ---------------- */
+/**
+ * Ponderação/sequência aproximada da série, a partir do sidecar do dcm2niix
+ * (descrição, sequência e, na falta de texto, TR/TE/TI) — para a legenda
+ * sobreposta à miniatura. Heurística: informativa, não diagnóstica.
+ */
+function inferSequence(sc, filename = '') {
+  const txt = [sc.SeriesDescription, sc.ProtocolName, sc.SequenceName, sc.PulseSequenceDetails, filename]
+    .filter(Boolean).join(' ').toUpperCase()
+    .replace(/\.NII(\.GZ)?$/, '').replace(/[_.\-]+/g, ' ') // separadores viram espaço p/ os \b
+  const contrast = Boolean(sc.ContrastBolusAgent) || /GADO|\bGD\b|\+\s*C\b|POS.?CONTRASTE|POST.?CONTRAST/.test(txt)
+  const tag = (s) => (contrast ? `${s} +C` : s)
+  if ((sc.Modality || '') === 'CT') return tag('TC')
+
+  if (/LOCALIZER|SCOUT|SURVEY|3.?PLANE/.test(txt)) return 'Localizador'
+  if (/\bADC\b|APPARENT/.test(txt)) return 'ADC'
+  if (/DTI|TENSOR|FA\b.*MAP|TRACTO/.test(txt)) return 'DTI'
+  if (/DWI|DIFF|TRACE|\bB0\b|B[- ]?1000/.test(txt)) return 'DWI'
+  if (/FLAIR/.test(txt)) return tag('FLAIR')
+  if (/SWI|SWAN|VENOBOLD/.test(txt)) return 'SWI'
+  if (/T2\s?\*|\bGRE\b|HEMO|MEDIC|\bFFE\b/.test(txt)) return 'T2*'
+  if (/\bTOF\b|ANGIO|\bMRA\b|\bARM\b/.test(txt)) return 'Angio'
+  if (/\bASL\b/.test(txt)) return 'ASL'
+  if (/PERF|\bPWI\b|\bDSC\b|\bDCE\b/.test(txt)) return 'Perfusão'
+  if (/\bBOLD\b|FMRI|\bREST\b/.test(txt)) return 'BOLD'
+  if (/\bSTIR\b/.test(txt)) return 'STIR'
+  if (/T1|MPRAGE|MP ?RAGE|SPGR|BRAVO|\bTFL\b/.test(txt)) return tag('T1')
+  if (/T2|\bTSE\b|\bFSE\b|HASTE|SS ?FSE/.test(txt)) return tag('T2')
+  if (/\bPD\b|\bDP\b|PROTON/.test(txt)) return 'DP'
+
+  // sem texto reconhecível: classifica por tempos de eco/repetição/inversão (s → ms)
+  const te = (sc.EchoTime || 0) * 1000, tr = (sc.RepetitionTime || 0) * 1000, ti = (sc.InversionTime || 0) * 1000
+  if (ti > 1500 && ti < 3200) return tag('FLAIR')
+  if (ti > 80 && ti < 350) return 'STIR'
+  if (te >= 80) return tag('T2')
+  if (te > 0 && te <= 30 && tr > 0 && tr <= 900) return tag('T1')
+  if (tr > 2000 && te > 0 && te < 30) return 'DP'
+  if ((sc.Modality || '') === 'MR') return 'RM'
+  return ''
+}
+
 async function addSeries(entries) {
   for (const e of entries) {
     state.series.push(e)
@@ -126,10 +194,12 @@ async function addSeries(entries) {
     const sc = e.sidecar
     const title = esc(sc.SeriesDescription || sc.ProtocolName || e.file.name.replace(/\.nii(\.gz)?$/i, ''))
     const mod = sc.Modality || (e.kind === 'nifti' ? 'NIfTI' : '')
-    item.innerHTML = `<figure style="margin:0"><div class="ph"></div>
-      <figcaption><strong title="${title}">${title}</strong>
-      <span>${mod ? `<span class="badge">${mod}</span>` : ''}<span class="dims mono"></span></span>
-      </figcaption></figure>`
+    const seq = inferSequence(sc, e.file.name)
+    item.innerHTML = `<div class="th-im"><div class="ph"></div>
+      ${seq ? `<span class="seq" title="Ponderação/sequência inferida dos metadados">${esc(seq)}</span>` : ''}
+      <span class="th-cap"><strong title="${title}">${title}</strong>
+      <span>${mod ? `<span class="badge">${mod}</span>` : ''}<span class="dims mono"></span></span></span>
+    </div>`
     item.onclick = () => openSeries(e.id)
     $('seriesList').appendChild(item)
     makeThumb(e.file).then(({ canvas, hdr }) => {
@@ -282,7 +352,14 @@ async function handleFiles(files) {
 
 /* ---------------- ligações ---------------- */
 function bind() {
-  document.querySelectorAll('.tool[data-tool]').forEach((b) => (b.onclick = () => setTool(b.dataset.tool)))
+  // o botão do mouse usado no clique define a qual botão a ferramenta se associa:
+  // esquerdo → botão esquerdo, direito → botão direito, meio → botão do meio
+  document.querySelectorAll('.tool[data-tool]').forEach((b) => {
+    b.onclick = () => assignTool('left', b.dataset.tool)
+    b.oncontextmenu = (e) => { e.preventDefault(); assignTool('right', b.dataset.tool) }
+    b.onauxclick = (e) => { if (e.button === 1) assignTool('middle', b.dataset.tool) }
+    b.onmousedown = (e) => { if (e.button === 1) e.preventDefault() } // evita o autoscroll do navegador
+  })
   document.querySelectorAll('.tool[data-view]').forEach((b) => (b.onclick = () => setView(b.dataset.view)))
 
   $('btnDicomDir').onclick = () => $('inDicomDir').click()
@@ -331,7 +408,7 @@ function bind() {
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase()
     const map = { c: 'crosshair', j: 'windowing', m: 'measurement', a: 'angle', v: 'pan' }
-    if (map[k] && !e.metaKey && !e.ctrlKey && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) setTool(map[k])
+    if (map[k] && !e.metaKey && !e.ctrlKey && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) assignTool('left', map[k])
   })
 }
 
