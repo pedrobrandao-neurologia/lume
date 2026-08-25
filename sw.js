@@ -1,11 +1,12 @@
 // sw.js — cache offline do Lume (app shell + vendor + fontes).
-const VERSION = 'lume-v0.6.0'
+const VERSION = 'lume-v0.7.0'
 const PRECACHE = [
   './index.html',
   './styles.css',
   './manifest.webmanifest',
   './js/app.js',
   './js/ingest.js',
+  './js/dicom-scan.js',
   './js/thumbs.js',
   './js/mip.js',
   './js/roi.js',

@@ -3,14 +3,15 @@
 // (dcm2niix WASM); renderização com NiiVue (WebGL2).
 
 import { Niivue, NVImage, DRAG_MODE } from '../vendor/niivue.min.js'
-import { ingest, filesFromDrop } from './ingest.js'
+import { splitInput, convertDicom, makeEntry, filesFromDrop } from './ingest.js'
+import { scanDicomSeries, directSeriesToNifti } from './dicom-scan.js'
 import { makeThumb } from './thumbs.js'
 import { slabProject, axisLabels } from './mip.js'
 import { createRoiTool } from './roi.js'
 import { bakeOblique } from './oblique.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.6.0'
+const VERSION = '0.7.0'
 
 const state = {
   nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
@@ -850,20 +851,114 @@ function applyIllumination() {
 }
 
 /* ---------------- entrada de arquivos ---------------- */
+// acima deste tamanho, o estudo passa pela triagem com escolha de séries —
+// evita alocar centenas de MB de uma vez (falhas de ArrayBuffer em máquinas
+// com pouca memória)
+const PICKER_MIN_FILES = 100
+
 async function handleFiles(files) {
   if (!files?.length) return
   try {
-    progress(0.15)
-    const entries = await ingest(files, log)
-    await addSeries(entries)
+    progress(0.1)
+    const { entries, dicoms } = await splitInput(files, log)
+    if (entries.length) {
+      await addSeries(entries)
+      log(`${entries.length} série(s) NIfTI adicionada(s).`)
+      if (!state.activeId) openSeries(entries[0].id)
+    }
+    if (dicoms.length) await handleDicoms(dicoms)
+    else if (!entries.length) throw new Error('nenhuma imagem reconhecida na seleção')
     progress(0)
-    log(`${entries.length} série(s) adicionada(s).`)
-    if (!state.activeId) openSeries(entries[0].id)
   } catch (err) {
     console.error(err)
     progress(0)
     log('Não foi possível abrir: ' + err.message)
   }
+}
+
+async function handleDicoms(dicoms) {
+  // triagem por cabeçalho: agrupa por série lendo só os primeiros KB de cada arquivo
+  log(`Lendo cabeçalhos de ${dicoms.length} arquivo(s)…`)
+  const groups = await scanDicomSeries(dicoms, (k, n) => {
+    progress(0.1 + 0.1 * (k / n)); log(`Lendo cabeçalhos… ${k}/${n}`)
+  })
+  if (!groups.length) {
+    // nada com UID de série — cai no caminho antigo (conversão em bloco)
+    const series = await convertDicom(dicoms, log)
+    await addSeries(series)
+    if (!state.activeId && series.length) openSeries(series[0].id)
+    return
+  }
+  let plan
+  if (groups.length === 1 && dicoms.length <= PICKER_MIN_FILES) {
+    plan = { selected: groups, direct: false } // estudo pequeno: converte sem perguntar
+  } else {
+    plan = await showSeriesPicker(groups, dicoms.length)
+  }
+  if (!plan || !plan.selected.length) { progress(0); log('Abertura cancelada.'); return }
+
+  // processa UMA série por vez: o pico de memória é o de uma série, não o do estudo
+  let opened = 0, failed = 0
+  for (let i = 0; i < plan.selected.length; i++) {
+    const g = plan.selected[i]
+    const tag = `Série ${i + 1}/${plan.selected.length} — ${g.desc}`
+    progress(0.2 + 0.78 * (i / plan.selected.length))
+    try {
+      let series
+      if (plan.direct && g.supportedDirect) {
+        log(`${tag}: lendo DICOM diretamente (${g.count} cortes)…`)
+        const { file, sidecar } = await directSeriesToNifti(g, (k, n) =>
+          progress(0.2 + 0.78 * ((i + k / n) / plan.selected.length)))
+        series = [makeEntry(file, sidecar, 'dicom')]
+      } else {
+        log(`${tag}: ${plan.direct ? 'sem suporte à leitura direta — ' : ''}convertendo (${g.count} arquivos)…`)
+        series = await convertDicom(g.files, log)
+      }
+      await addSeries(series)
+      opened += series.length
+      if (!state.activeId && series.length) openSeries(series[0].id)
+    } catch (err) {
+      console.error(err); failed++
+      log(`${tag}: falhou (${err.message}) — seguindo para a próxima.`)
+    }
+  }
+  progress(0)
+  log(`${opened} série(s) aberta(s)${failed ? ` · ${failed} falha(s)` : ''}.`)
+}
+
+/** Diálogo de triagem: escolher séries e modo de abertura. */
+function showSeriesPicker(groups, totalFiles) {
+  return new Promise((resolve) => {
+    const dlg = $('dlgSeries')
+    const totalMB = groups.reduce((s, g) => s + g.bytes, 0) / 1048576
+    const big = totalFiles > 800 || totalMB > 800
+    $('seriesPickInfo').textContent =
+      `${groups.length} série(s) · ${totalFiles} arquivo(s) · ${fmt(totalMB, 0)} MB. ` +
+      `Abrir menos séries de uma vez poupa memória${big ? ' — estudo grande: selecione só o necessário' : ''}.`
+    $('seriesPickList').innerHTML = groups.map((g, i) => `
+      <li><label><input type="checkbox" data-g="${i}" ${big ? '' : 'checked'} />
+        <span class="pick-desc"><strong>${esc(g.desc)}</strong>
+        <span class="mono">${esc(g.sidecar.Modality || '?')} · ${g.count} img · ${fmt(g.bytes / 1048576, 1)} MB${g.supportedDirect ? '' : ' · só conversão'}</span></span>
+      </label></li>`).join('')
+    let settled = false
+    const done = (value) => {
+      if (settled) return
+      settled = true
+      if (dlg.open) dlg.close()
+      resolve(value)
+    }
+    $('btnSeriesAll').onclick = () => dlg.querySelectorAll('input[data-g]').forEach((c) => (c.checked = true))
+    $('btnSeriesNone').onclick = () => dlg.querySelectorAll('input[data-g]').forEach((c) => (c.checked = false))
+    $('btnSeriesCancel').onclick = () => done(null)
+    dlg.oncancel = () => done(null)
+    $('btnSeriesOpen').onclick = () => {
+      const selected = [...dlg.querySelectorAll('input[data-g]:checked')].map((c) => groups[Number(c.dataset.g)])
+      if (!selected.length) { log('Selecione ao menos uma série.'); return }
+      const direct = dlg.querySelector('input[name="openMode"]:checked')?.value === 'direct'
+      done({ selected, direct })
+    }
+    dlg.showModal()
+  })
 }
 
 /* ---------------- ligações ---------------- */

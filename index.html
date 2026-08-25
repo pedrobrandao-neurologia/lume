@@ -192,6 +192,24 @@
   <span id="statusMsg">pronto — abra uma pasta DICOM, NIfTI ou ZIP</span>
 </footer>
 
+<dialog id="dlgSeries" aria-label="Seleção de séries">
+  <h2>Abrir estudo DICOM</h2>
+  <p class="hint" id="seriesPickInfo"></p>
+  <ul class="series-pick" id="seriesPickList"></ul>
+  <div class="pick-mode">
+    <label><input type="radio" name="openMode" value="convert" checked />
+      Converter para NIfTI (dcm2niix) — mais compatível</label>
+    <label><input type="radio" name="openMode" value="direct" />
+      Ler DICOM diretamente — mais econômico em memória (séries comprimidas ou multiframe caem automaticamente na conversão)</label>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button id="btnSeriesAll">Todas</button>
+    <button id="btnSeriesNone">Nenhuma</button>
+    <button id="btnSeriesCancel">Cancelar</button>
+    <button id="btnSeriesOpen" class="primary grow">Abrir selecionadas</button>
+  </div>
+</dialog>
+
 <dialog id="dlgHelp" aria-label="Tutorial e atalhos">
   <h2>Tutorial — mouse e teclado</h2>
   <p class="hint">O Lume funciona como uma workstation: cada gesto do mouse tem uma ação, e você pode

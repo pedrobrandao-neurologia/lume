@@ -191,6 +191,25 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 .slice-ctl:hover input[type=range] { opacity: 1; }
 .slice-ctl span { font-size: 9.5px; color: var(--dim); background: rgba(10,12,14,.7); padding: 0 3px; border-radius: 3px; }
 
+/* diálogo de seleção de séries (triagem de memória) */
+#dlgSeries {
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 18px 20px; width: min(92vw, 34rem);
+  max-height: 84vh; overflow-y: auto; scrollbar-width: thin;
+}
+#dlgSeries::backdrop { background: rgba(0, 0, 0, 0.6); }
+#dlgSeries h2 { margin: 0 0 6px; font: 600 17px var(--disp); }
+.series-pick { list-style: none; margin: 10px 0; padding: 0; max-height: 40vh; overflow-y: auto; scrollbar-width: thin; }
+.series-pick li { border-bottom: 1px solid var(--line); }
+.series-pick label { flex-direction: row; align-items: center; gap: 10px; padding: 7px 2px; font-size: 13.5px; color: var(--ink); cursor: pointer; }
+.series-pick input { width: auto; accent-color: var(--teal); }
+.series-pick .pick-desc { display: flex; flex-direction: column; min-width: 0; }
+.series-pick .pick-desc strong { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.series-pick .pick-desc .mono { color: var(--dim); font-size: 11px; }
+.pick-mode { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.pick-mode label { flex-direction: row; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
+.pick-mode input { width: auto; accent-color: var(--teal); }
+
 /* diálogo de tutorial/atalhos */
 #dlgHelp {
   background: var(--surface); color: var(--ink); border: 1px solid var(--line);
