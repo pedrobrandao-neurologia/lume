@@ -11,7 +11,7 @@ import { createRoiTool } from './roi.js'
 import { bakeOblique } from './oblique.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.7.0'
+const VERSION = '0.8.0'
 
 const state = {
   nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
@@ -22,8 +22,8 @@ const state = {
   activeId: null,
   vol: null,           // NVImage base em exibição (original ou oblíquo)
   origVol: null,       // NVImage original da série ativa (p/ desfazer o oblíquo)
-  mipVol: null,        // NVImage derivado (thick slab), quando ativo
   roi: null,           // controlador de ROIs
+  busy: false,         // reconstrução pesada em andamento (MIP/oblíquo)
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
   mouse: null, // gestos do mouse → ação (carregado de MOUSE_DEFAULTS + localStorage)
@@ -86,6 +86,18 @@ function progress(p) {
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 const fmt = (n, d = 1) => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: d })
 
+/** Traz um painel do inspetor à vista e o destaca — o resultado de uma
+ *  ação nunca deve aparecer fora da área visível. */
+function flashPanel(id) {
+  const el = $(id)
+  if (!el) return
+  el.scrollIntoView({ block: 'nearest' })
+  el.classList.remove('flash')
+  void el.offsetWidth // reinicia a animação
+  el.classList.add('flash')
+  setTimeout(() => el.classList.remove('flash'), 1000)
+}
+
 /* ---------------- visualizador ---------------- */
 async function initViewer() {
   const nv = new Niivue({
@@ -99,18 +111,67 @@ async function initViewer() {
   nv.setSliceType(nv.sliceTypeMultiplanar)
   nv.opts.yoke3Dto2DZoom = true
 
-  nv.onLocationChange = (d) => { $('statusLoc').textContent = d?.string || '' }
   nv.onIntensityChange = () => syncWindowInputs()
-  $('gl').addEventListener('pointerdown', (e) => { state.lastGesture = gestureOf(e) }, true)
-  nv.onDragRelease = (p) => {
-    // registra a medida se o gesto solto estava com a ferramenta de medição
-    if (state.mouse[state.lastGesture] === 'measurement' && p?.mmLength > 0.5) {
-      state.measures.push(p.mmLength)
-      renderMeasures()
-    }
-  }
   state.nv = nv
   await ensurePanel(0) // registra o visualizador como painel principal
+}
+
+/* ---------------- medidas: distância e ângulo ---------------- */
+// Traço e rótulo em âmbar (o vermelho padrão do NiiVue some sobre imagem
+// clara) e texto maior — a medida precisa ser legível à distância da tela.
+function styleMeasurements(nv) {
+  nv.opts.rulerColor = [0.31, 0.85, 0.92, 0.95] // corpo do traço (ciano: contrasta com o cursor âmbar)
+  nv.opts.rulerWidth = 3
+  nv.opts.measureLineColor = [0.98, 0.9, 0.6, 1]  // marcas das extremidades
+  nv.opts.measureTextColor = [0.99, 0.93, 0.75, 1]
+  nv.opts.measureTextHeight = 0.095               // rótulo ~1,6× o padrão (o NiiVue escala por /0.06)
+}
+
+/** Registra medidas (distância e ângulo) feitas em qualquer painel. */
+function installMeasureCallbacks(panel, i) {
+  const nv = panel.nv
+  panel.canvas.addEventListener('pointerdown', (e) => { state.lastGesture = gestureOf(e) }, true)
+  // a coordenada na barra de status vem do painel que o usuário está usando
+  nv.onLocationChange = (d) => { if (state.focus === i) $('statusLoc').textContent = d?.string || '' }
+  nv.onDragRelease = (p) => {
+    if (state.mouse[state.lastGesture] === 'measurement' && p?.mmLength > 0.5) {
+      state.measures.push({ kind: 'dist', value: p.mmLength, panel: i })
+      renderMeasures()
+      flashPanel('panelMeasures')
+      log(`Distância: ${fmt(p.mmLength, 1)} mm.`)
+    }
+  }
+  nv.onAngleCompleted = (a) => {
+    if (!(a?.angle >= 0)) return
+    state.measures.push({ kind: 'angle', value: a.angle, panel: i })
+    renderMeasures()
+    flashPanel('panelMeasures')
+    log(`Ângulo: ${fmt(a.angle, 1)}°. Arraste um novo traço para medir outro.`)
+  }
+}
+
+/** Estado do ângulo → instrução na barra de status (fluxo de dois passos). */
+function angleHint(panel) {
+  if (state.mouse[state.lastGesture] !== 'angle') return
+  const s = panel.nv.uiData?.angleState
+  if (s === 'drawing_first_line') log('Ângulo: arraste o primeiro traço (o vértice fica no fim dele).')
+  else if (s === 'drawing_second_line') log('Ângulo: mova o mouse e clique para fechar o ângulo (Esc cancela).')
+}
+
+/** Cancela um ângulo em andamento em todos os painéis. */
+function cancelPendingAngle(quiet = false) {
+  let had = false
+  for (const p of state.panels.filter(Boolean)) {
+    const u = p.nv.uiData
+    if (!u || u.angleState === 'none') continue
+    if (u.angleState === 'drawing_first_line' || u.angleState === 'drawing_second_line') had = true
+    p.nv.resetAngleMeasurement?.()
+    u.isDragging = false
+    p.nv.clearActiveDragMode?.()
+    p.nv.drawScene()
+  }
+  if (had && !quiet) log('Ângulo cancelado.')
+  return had
 }
 
 /* ---------------- comparação em 1–4 painéis sincronizados ---------------- */
@@ -137,10 +198,16 @@ async function ensurePanel(i) {
     await nv.attachToCanvas(canvas)
     nv.opts.yoke3Dto2DZoom = true
   }
+  styleMeasurements(nv)
   const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i] }
   state.panels[i] = panel
   canvas.addEventListener('pointerdown', () => focusPanel(i))
+  installMeasureCallbacks(panel, i)
   installPanelGestures(panel, i)
+  // o NiiVue muda o estado do ângulo depois dos nossos handlers: consulta no fim do turno
+  const hint = () => setTimeout(() => angleHint(panel), 0)
+  canvas.addEventListener('pointerup', hint)
+  canvas.addEventListener('pointerdown', hint)
   applyMouseConfig()
   rewireSync()
   return panel
@@ -178,11 +245,17 @@ async function setLayout(n) {
     // então o display precisa ser gerido aqui também
     c.style.display = i >= n ? 'none' : 'block'
   }
+  // painéis que saíram de cena liberam o volume (memória de CPU e GPU)
+  for (let i = n; i < 4; i++) {
+    const p = state.panels[i]
+    if (!p || !p.id) continue
+    while (p.nv.volumes.length) p.nv.removeVolume(p.nv.volumes[0])
+    p.id = null
+  }
   for (let i = 0; i < n; i++) {
-    const isNew = !state.panels[i]
     const panel = await ensurePanel(i)
-    // painel recém-aberto: recebe a série ativa na orientação padrão (sag/cor/ax)
-    if (isNew && i > 0 && state.activeId && !panel.id) {
+    // painel aberto (ou reaberto) sem série: recebe a ativa na orientação padrão
+    if (i > 0 && state.activeId && !panel.id) {
       applyPanelView(panel)
       await loadIntoPanel(i, state.activeId)
     }
@@ -225,6 +298,14 @@ async function loadIntoPanel(i, id) {
     else { v.cal_min = v.robust_min ?? v.global_min; v.cal_max = v.robust_max ?? v.global_max }
     nv.updateGLVolume()
     applyPanelView(panel)
+    // herda o cursor do painel principal (em mm): um painel recém-aberto deve
+    // mostrar o corte que já está em foco, não o centro do volume
+    const src = state.panels[0]
+    if (src?.nv.volumes.length && src !== panel) {
+      const mm = src.nv.frac2mm(src.nv.scene.crosshairPos)
+      nv.scene.crosshairPos = nv.mm2frac([mm[0], mm[1], mm[2]])
+    }
+    nv.drawScene()
     markActiveThumbs()
     progress(0)
     log(`Painel ${i + 1}: ${entry.file.name} (${panel.view}) — cursor sincronizado em mm.`)
@@ -290,9 +371,18 @@ function zoomPanel(panel, factor) {
   if (panel.view === 'render') {
     nv.scene.volScaleMultiplier = Math.min(8, Math.max(0.2, nv.scene.volScaleMultiplier * factor))
   } else {
+    // ancora o zoom no cursor (mesma correção de pan que o NiiVue aplica),
+    // senão a estrutura sob o cursor foge da tela ao ampliar
     const p = nv.scene.pan2Dxyzmm
-    p[3] = Math.min(16, Math.max(0.2, p[3] * factor))
+    const newZoom = Math.min(16, Math.max(0.2, p[3] * factor))
+    const zoomChange = p[3] - newZoom
+    const mm = nv.frac2mm(nv.scene.crosshairPos)
+    p[3] = newZoom
+    p[0] += zoomChange * mm[0]
+    p[1] += zoomChange * mm[1]
+    p[2] += zoomChange * mm[2]
     nv.scene.pan2Dxyzmm = p
+    if (nv.opts.yoke3Dto2DZoom) nv.scene.volScaleMultiplier = newZoom
   }
   nv.drawScene()
 }
@@ -317,9 +407,13 @@ function panMmPerPx(panel) {
   return 0.5
 }
 
-function panPanel(panel, dx, dy, scale) {
+// eixos anatômicos de cada plano: [eixo horizontal, eixo vertical] do tile
+const PLANE_AXES = { 0: [0, 1], 1: [0, 2], 2: [1, 2] } // axial · coronal · sagital
+function panPanel(panel, dx, dy, scale, acs = 0) {
+  const [hx, vy] = PLANE_AXES[acs] || PLANE_AXES[0]
   const p = panel.nv.scene.pan2Dxyzmm
-  p[0] += dx * scale; p[1] -= dy * scale
+  p[hx] += dx * scale
+  p[vy] -= dy * scale // a tela cresce para baixo; os eixos anatômicos, para cima
   panel.nv.scene.pan2Dxyzmm = p
   panel.nv.drawScene()
 }
@@ -331,6 +425,8 @@ function installPanelGestures(panel, idx) {
 
   // intercepta os gestos que o NiiVue não cobre (browse/zoom, Alt, botões 4/5)
   canvas.addEventListener('pointerdown', (e) => {
+    // ROI armada tem prioridade sobre o botão esquerdo no painel principal
+    if (idx === 0 && e.button === 0 && state.roi?.armed) return
     const g = gestureOf(e)
     if (!g) return
     const act = state.mouse[g]
@@ -342,7 +438,16 @@ function installPanelGestures(panel, idx) {
     }
     e.preventDefault(); e.stopImmediatePropagation()
     canvas.setPointerCapture(e.pointerId)
-    drag = { act, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, acc: 0, mmpp: act === 'pan' ? panMmPerPx(panel) : 0 }
+    // o plano do tile onde o arrasto começou define os eixos do pan (no MPR
+    // cada tile tem orientação própria)
+    const r = canvas.getBoundingClientRect()
+    const tile = panel.nv.tileIndex((e.clientX - r.left) * dpr(), (e.clientY - r.top) * dpr())
+    const acs = panel.nv.screenSlices?.[tile]?.axCorSag
+    drag = {
+      act, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false, acc: 0,
+      acs: acs >= 0 && acs <= 2 ? acs : 0,
+      mmpp: act === 'pan' ? panMmPerPx(panel) : 0,
+    }
   }, true)
 
   canvas.addEventListener('pointermove', (e) => {
@@ -358,7 +463,7 @@ function installPanelGestures(panel, idx) {
       while (drag.acc <= -step) { stepSlice(panel, 1); drag.acc += step }
     } else if (drag.act === 'zoom') zoomPanel(panel, Math.exp(-dy * 0.004))
     else if (drag.act === 'windowing') windowPanel(panel, dx, dy)
-    else if (drag.act === 'pan') panPanel(panel, dx, dy, drag.mmpp)
+    else if (drag.act === 'pan') panPanel(panel, dx, dy, drag.mmpp, drag.acs)
   }, true)
 
   const finish = (e) => {
@@ -458,7 +563,8 @@ async function openInNewPanel(id) {
   if (state.layout < 4) {
     const n = state.layout + 1
     await setLayout(n)
-    await loadIntoPanel(n - 1, id)
+    // setLayout já povoa o painel novo com a série ativa; só recarrega se for outra
+    if (state.panels[n - 1]?.id !== id) await loadIntoPanel(n - 1, id)
     focusPanel(n - 1)
   } else {
     const t = state.focus > 0 ? state.focus : 1
@@ -480,10 +586,19 @@ function assignTool(gesture, action) {
   const g = GESTURES.find((x) => x.key === gesture)
   if (!g || !(action in ACTIONS)) return
   if (g.emulOnly && !ACTIONS[action].emul) { log(`${ACTIONS[action].label} não é possível nesse botão.`); return }
+  // um ângulo pela metade não pode sobreviver à troca de ferramenta:
+  // o próximo arrasto fecharia o ângulo antigo em vez de começar um novo
+  cancelPendingAngle(true)
   state.mouse[gesture] = action
   applyMouseConfig()
   const names = { left: 'esquerdo', right: 'direito', middle: 'do meio' }
-  if (names[gesture]) log(`${ACTIONS[action].label} no botão ${names[gesture]} do mouse.`)
+  if (action === 'angle' && gesture === 'left') {
+    log('Ângulo: arraste o primeiro traço; solte, mova o mouse e clique para fechar (Esc cancela).')
+  } else if (action === 'measurement' && gesture === 'left') {
+    log('Medir: arraste sobre a imagem — o valor entra no painel Medidas.')
+  } else if (names[gesture]) {
+    log(`${ACTIONS[action].label} no botão ${names[gesture]} do mouse.`)
+  }
 }
 
 function applyMouseConfig() {
@@ -491,9 +606,16 @@ function applyMouseConfig() {
   // gesto custom (browse/zoom) é interceptado antes do NiiVue; para o motor,
   // cai em crosshair — que no painel 3D preserva a rotação padrão por arrasto
   const nvMode = (a) => (ACTIONS[a]?.native ? TOOL_MODES[a] : DRAG_MODE.crosshair)
+  // opts.dragMode é só o fallback (mouseEventConfig manda), mas o NiiVue o
+  // consulta em dois pontos: com 'pan' a roda vira zoom, e o ângulo depende
+  // dele para preservar o vértice do segundo traço
+  const usaAngulo = Object.values(m).includes('angle')
+  const fallback = usaAngulo ? DRAG_MODE.angle
+    : m.right === 'pan' ? DRAG_MODE.crosshair
+      : nvMode(m.right)
   for (const nv of state.panels.filter(Boolean).map((p) => p.nv)) {
     nv.opts.dragModePrimary = nvMode(m.left)
-    nv.opts.dragMode = nvMode(m.right)
+    nv.opts.dragMode = fallback
     nv.opts.mouseEventConfig = {
       leftButton: {
         primary: nvMode(m.left),
@@ -532,7 +654,9 @@ function setView(view) {
 }
 
 /* ---------------- janela ---------------- */
-function displayedVol() { return state.nv.volumes[0] || null }
+// A janela age no painel focado — é o painel que o usuário está lendo.
+function focusedNv() { return (state.panels[state.focus] || state.panels[0])?.nv || state.nv }
+function displayedVol() { return focusedNv().volumes[0] || null }
 
 function syncWindowInputs() {
   const v = displayedVol()
@@ -548,7 +672,7 @@ function applyWindow(wl, ww) {
   if (!v || !(ww > 0)) return
   v.cal_min = wl - ww / 2
   v.cal_max = wl + ww / 2
-  state.nv.updateGLVolume()
+  focusedNv().updateGLVolume()
   syncWindowInputs()
 }
 
@@ -557,7 +681,7 @@ function autoWindow() {
   if (!v) return
   v.cal_min = v.robust_min ?? v.global_min
   v.cal_max = v.robust_max ?? v.global_max
-  state.nv.updateGLVolume()
+  focusedNv().updateGLVolume()
   syncWindowInputs()
 }
 
@@ -652,12 +776,15 @@ async function volumeFor(entry) {
   return vol
 }
 
+let openSeq = 0 // serializa aberturas concorrentes (duas seleções em sequência)
 async function openSeries(id) {
   const entry = state.series.find((s) => s.id === id)
   if (!entry) return
+  const seq = ++openSeq
   log(`Abrindo ${entry.file.name}…`); progress(0.3)
   try {
     let vol = await volumeFor(entry)
+    if (seq !== openSeq) return // outra série foi pedida durante o carregamento
     // NVImage já exibido noutro painel: clona para não compartilhar entre contextos GL
     if (state.panels.some((p, k) => k > 0 && p && p.nv.volumes.includes(vol))) vol = vol.clone()
     const nv = state.nv
@@ -665,11 +792,13 @@ async function openSeries(id) {
     await nv.addVolume(vol)
     state.vol = vol
     state.origVol = vol
-    state.mipVol = null
     state.activeId = id
     if (state.panels[0]) state.panels[0].id = id
     $('btnMipOff').hidden = true
     $('btnObliqueOff').hidden = true
+    // os controles precisam refletir a série nova, não a anterior
+    $('obLR').value = $('obAP').value = $('obSI').value = 0
+    $('colormap').value = vol.colormap || 'gray'
     state.roi?.clear()
     $('dropzone').classList.add('hidden')
     markActiveThumbs()
@@ -713,7 +842,25 @@ function renderMeta(entry, vol) {
 function renderMeasures() {
   const ol = $('measureList')
   if (!state.measures.length) { ol.innerHTML = '<li class="empty">Nenhuma medida ainda.</li>'; return }
-  ol.innerHTML = state.measures.map((mm) => `<li>${fmt(mm, 1)} mm${mm > 10 ? ` <span style="color:var(--dim)">(${fmt(mm / 10, 2)} cm)</span>` : ''}</li>`).join('')
+  const dim = (t) => `<span style="color:var(--dim)">${t}</span>`
+  ol.innerHTML = state.measures.map((m) => {
+    const origem = state.layout > 1 ? ` ${dim(`· painel ${m.panel + 1}`)}` : ''
+    if (m.kind === 'angle') return `<li>∠ ${fmt(m.value, 1)}°${origem}</li>`
+    const cm = m.value > 10 ? ` ${dim(`(${fmt(m.value / 10, 2)} cm)`)}` : ''
+    return `<li>⟷ ${fmt(m.value, 1)} mm${cm}${origem}</li>`
+  }).join('')
+}
+
+/** Apaga as medidas: lista do painel lateral e traços desenhados nos painéis. */
+function clearMeasures() {
+  state.measures = []
+  cancelPendingAngle(true)
+  for (const p of state.panels.filter(Boolean)) {
+    p.nv.clearAllMeasurements?.()
+    p.nv.drawScene()
+  }
+  renderMeasures()
+  log('Medidas apagadas.')
 }
 
 /* ---------------- MIP ---------------- */
@@ -722,15 +869,27 @@ function populateMipAxes(vol) {
   $('mipAxis').innerHTML = labels.map((l, i) => `<option value="${i}" ${l.startsWith('Axial') ? 'selected' : ''}>${l}</option>`).join('')
 }
 
+/** Copia atributos de exibição que o clone() do NiiVue não leva junto. */
+function inheritDisplay(dst, src) {
+  dst.colormap = src.colormap || 'gray'
+  dst.opacity = src.opacity ?? 1
+  dst.cal_min = src.cal_min; dst.cal_max = src.cal_max
+  return dst
+}
+
 async function applyMip() {
   const vol = state.vol
-  if (!vol) return
+  if (!vol) { log('Abra uma série antes de aplicar a projeção.'); return }
+  if (state.busy) { log('Aguarde a operação em andamento terminar.'); return }
   const axis = Number($('mipAxis').value)
   const mode = $('mipMode').value
   const label = { max: 'MIP', min: 'MinIP', mean: 'Média' }[mode] || 'MIP'
   const mm = Math.max(1, Number($('mipMM').value) || 12)
   const pd = Math.abs(vol.hdr.pixDims[axis + 1]) || 1
   const slabVox = Math.max(1, Math.round(mm / pd))
+  const forId = state.activeId // a série pode mudar durante o cálculo
+  state.busy = true
+  $('btnMip').disabled = true
   log(`Calculando ${label} (${mm} mm ≈ ${slabVox} voxels)…`); progress(0.4)
   await new Promise((r) => setTimeout(r)) // deixa a barra pintar antes do laço pesado
   try {
@@ -739,21 +898,22 @@ async function applyMip() {
     const nvox = dims[0] * dims[1] * dims[2]
     const src = vol.img.length > nvox ? vol.img.subarray(0, nvox) : vol.img
     const out = slabProject(src, dims, axis, slabVox, mode)
-    const mip = vol.clone()
-    mip.zeroImage()
+    if (state.activeId !== forId) { progress(0); log('Série trocada — projeção descartada.'); return }
+    const mip = inheritDisplay(vol.clone(), vol)
     mip.img = out
     if (mip.hdr.dims[0] >= 4) { mip.hdr.dims[0] = 3; mip.hdr.dims[4] = 1 }
     mip.name = `${label} ${mm}mm — ${vol.name}`
-    mip.cal_min = vol.cal_min; mip.cal_max = vol.cal_max
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
     await nv.addVolume(mip)
-    state.mipVol = mip
     $('btnMipOff').hidden = false
     progress(0)
     log(`${label} de ${mm} mm aplicado — “Original” desfaz.`)
   } catch (err) {
     console.error(err); progress(0); log(`${label} falhou: ` + err.message)
+  } finally {
+    state.busy = false
+    $('btnMip').disabled = false
   }
 }
 
@@ -762,7 +922,6 @@ async function removeMip() {
   const nv = state.nv
   while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
   await nv.addVolume(state.vol)
-  state.mipVol = null
   $('btnMipOff').hidden = true
   syncWindowInputs()
   log('Volume original restaurado.')
@@ -771,12 +930,17 @@ async function removeMip() {
 /* ---------------- MPR oblíquo ---------------- */
 async function applyOblique() {
   const src = state.origVol
-  if (!src) return
+  if (!src) { log('Abra uma série antes de reformatar.'); return }
+  if (state.busy) { log('Aguarde a operação em andamento terminar.'); return }
   const degLR = Number($('obLR').value) || 0
   const degAP = Number($('obAP').value) || 0
   const degSI = Number($('obSI').value) || 0
   if (!degLR && !degAP && !degSI) { removeOblique(); return }
   const centerMM = state.nv.frac2mm(state.nv.scene.crosshairPos)
+  const shown = state.nv.volumes[0]
+  const forId = state.activeId // a série pode mudar durante a reamostragem
+  state.busy = true
+  $('btnOblique').disabled = true
   log(`Reformatando oblíquo (${degLR}°/${degAP}°/${degSI}°)…`)
   try {
     const out = await bakeOblique(src, {
@@ -784,18 +948,15 @@ async function applyOblique() {
       centerMM: [centerMM[0], centerMM[1], centerMM[2]],
       onProgress: (p) => progress(Math.max(0.02, p * 0.98)),
     })
-    const ob = src.clone()
-    ob.zeroImage()
+    if (state.activeId !== forId) { progress(0); log('Série trocada — reformatação descartada.'); return }
+    const ob = inheritDisplay(src.clone(), shown || src)
     ob.img = out
     if (ob.hdr.dims[0] >= 4) { ob.hdr.dims[0] = 3; ob.hdr.dims[4] = 1 }
     ob.name = `Oblíquo ${degLR}/${degAP}/${degSI}° — ${src.name}`
-    ob.cal_min = state.nv.volumes[0]?.cal_min ?? src.cal_min
-    ob.cal_max = state.nv.volumes[0]?.cal_max ?? src.cal_max
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
     await nv.addVolume(ob)
     state.vol = ob        // o thick slab passa a operar sobre o oblíquo
-    state.mipVol = null
     $('btnMipOff').hidden = true
     $('btnObliqueOff').hidden = false
     state.roi?.clear()    // as ROIs valem para a grade em exibição
@@ -804,6 +965,9 @@ async function applyOblique() {
   } catch (err) {
     console.error(err); progress(0)
     log('Oblíquo falhou: ' + err.message)
+  } finally {
+    state.busy = false
+    $('btnOblique').disabled = false
   }
 }
 
@@ -813,7 +977,6 @@ async function removeOblique() {
   while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
   await nv.addVolume(state.origVol)
   state.vol = state.origVol
-  state.mipVol = null
   $('btnMipOff').hidden = true
   $('btnObliqueOff').hidden = true
   state.roi?.clear()
@@ -822,8 +985,11 @@ async function removeOblique() {
 }
 
 /* ---------------- ROIs ---------------- */
+let lastRoiCount = 0
 function renderRoiList(rois, selected) {
   const ol = $('roiList')
+  if (rois.length > lastRoiCount) flashPanel('panelRoi') // ROI nova: traz a estatística à vista
+  lastRoiCount = rois.length
   if (!rois.length) { ol.innerHTML = '<li class="empty">Nenhuma ROI ainda.</li>'; return }
   ol.innerHTML = rois.map((r, i) => {
     const s = r.stats
@@ -837,17 +1003,28 @@ function renderRoiList(rois, selected) {
     (li.onclick = () => state.roi.select(Number(li.dataset.roi))))
 }
 
-function armRoi(kind) {
-  const armed = state.roi.arm(kind)
+/** Reflete na barra o estado real das ferramentas de ROI (inclui o Esc do roi.js). */
+function syncRoiButtons(armed) {
   $('toolRoiEllipse').classList.toggle('armed', armed === 'ellipse')
   $('toolRoiLasso').classList.toggle('armed', armed === 'lasso')
-  if (armed === 'ellipse') log('ROI elíptica: arraste no painel esquerdo. Esc sai.')
-  else if (armed === 'lasso') log('Laço: arraste o traçado — ou use as setas + Espaço (Enter fecha). Esc sai.')
+}
+
+function armRoi(kind) {
+  if (!state.nv.volumes.length) { log('Abra uma série antes de traçar uma ROI.'); return }
+  const armed = state.roi.arm(kind)
+  // a ROI só existe no painel principal: leva o foco para ele, senão o usuário
+  // desenha num painel de comparação e nada acontece
+  const noPainel1 = armed && state.layout > 1 ? ' — no painel 1 (destacado)' : ''
+  if (armed && state.focus !== 0) focusPanel(0)
+  if (armed === 'ellipse') log(`ROI elíptica: arraste sobre a imagem${noPainel1}. Esc sai.`)
+  else if (armed === 'lasso') log(`Laço: arraste o traçado — ou setas + Espaço, Enter fecha${noPainel1}. Esc sai.`)
+  else log('Ferramenta de ROI desativada.')
 }
 
 /* ---------------- 3D ---------------- */
 function applyIllumination() {
-  if (state.nv.volumes.length) state.nv.setVolumeRenderIllumination(Number($('illum').value))
+  const nv = focusedNv() // o painel 3D visível é o focado
+  if (nv.volumes.length) nv.setVolumeRenderIllumination(Number($('illum').value))
 }
 
 /* ---------------- entrada de arquivos ---------------- */
@@ -1008,7 +1185,13 @@ function bind() {
   ;['dragenter', 'dragover'].forEach((ev) => stage.addEventListener(ev, (e) => {
     e.preventDefault(); $('dropzone').classList.remove('hidden'); $('dropzone').classList.add('hover')
   }))
-  stage.addEventListener('dragleave', () => $('dropzone').classList.remove('hover'))
+  // sair do palco (ou da janela) esconde a caixa de novo — senão ela fica
+  // permanentemente sobre a imagem depois de um arrasto abandonado
+  stage.addEventListener('dragleave', (e) => {
+    if (stage.contains(e.relatedTarget)) return
+    $('dropzone').classList.remove('hover')
+    if (state.activeId) $('dropzone').classList.add('hidden')
+  })
   stage.addEventListener('drop', async (e) => {
     e.preventDefault()
     $('dropzone').classList.remove('hover')
@@ -1035,11 +1218,15 @@ function bind() {
   $('btnClearRois').onclick = () => state.roi.clear()
   $('illum').onchange = applyIllumination
   $('clip').oninput = () => {
+    // o NiiVue desliga o corte com profundidade > 2; o extremo direito do
+    // controle é justamente "sem corte"
     const d = Number($('clip').value)
-    state.nv.setClipPlane([d > 1 ? 2 : d, 270, 0])
+    const off = d >= 2
+    focusedNv().setClipPlane([off ? 3 : d, 270, 0])
+    $('clipVal').textContent = off ? 'desligado' : fmt(d, 2)
   }
 
-  $('btnClearMeasures').onclick = () => { state.measures = []; renderMeasures() }
+  $('btnClearMeasures').onclick = clearMeasures
   $('btnReset').onclick = () => {
     for (const nv of state.panels.filter(Boolean).map((p) => p.nv)) {
       nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
@@ -1047,13 +1234,24 @@ function bind() {
     }
     autoWindow()
   }
-  $('btnShot').onclick = () => state.nv.saveScene(`lume-${Date.now()}.png`)
+  $('btnShot').onclick = () => {
+    focusedNv().saveScene(`lume-${Date.now()}.png`)
+    log(state.layout > 1 ? `Captura do painel ${state.focus + 1} salva.` : 'Captura salva.')
+  }
 
   window.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return
     if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return
+    // com um diálogo aberto os atalhos não valem (senão trocam ferramentas por trás)
+    if (document.querySelector('dialog[open]')) return
+    // Esc: cancela o ângulo em andamento e, se não houver, sai da ferramenta de medida
+    if (e.key === 'Escape') {
+      if (cancelPendingAngle()) return
+      if (state.mouse.left === 'angle' || state.mouse.left === 'measurement') assignTool('left', 'browse')
+      return
+    }
     const k = e.key.toLowerCase()
-    const map = { c: 'crosshair', j: 'windowing', m: 'measurement', a: 'angle', v: 'pan' }
+    const map = { b: 'browse', c: 'crosshair', j: 'windowing', m: 'measurement', a: 'angle', v: 'pan', z: 'zoom' }
     if (map[k]) { assignTool('left', map[k]); return }
     if (k === 'e') { armRoi('ellipse'); return }
     if (k === 'l') { armRoi('lasso'); return }
@@ -1077,6 +1275,7 @@ state.roi = createRoiTool({
   glCanvas: $('gl'),
   getVol: () => state.nv.volumes[0] || null,
   onChange: renderRoiList,
+  onArmChange: syncRoiButtons,
   isMagnet: () => $('roiMagnet').checked,
   log,
 })
