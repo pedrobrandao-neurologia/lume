@@ -9,7 +9,7 @@ const AXIS = [
   { u: 1, v: 2, n: 0 }, // sagital:  y (A–P) × z (S–I), normal x
 ]
 
-export function createRoiTool({ nv, overlay, glCanvas, getVol, onChange, isMagnet, log }) {
+export function createRoiTool({ nv, overlay, glCanvas, getVol, onChange, onArmChange, isMagnet, log }) {
   const rois = []            // {kind, acs, planeMM, pts|{c,a,b}, stats}
   let armed = null           // null | 'ellipse' | 'lasso'
   let draw = null            // desenho em curso (mouse)
@@ -152,11 +152,16 @@ export function createRoiTool({ nv, overlay, glCanvas, getVol, onChange, isMagne
   function arm(kind) {
     armed = armed === kind ? null : kind
     draw = null; kb = null
-    overlay.style.pointerEvents = armed ? 'auto' : 'none'
-    overlay.style.cursor = armed ? 'crosshair' : ''
+    glCanvas.style.cursor = armed ? 'crosshair' : ''
+    onArmChange?.(armed) // mantém os botões da barra coerentes com o estado real
     return armed
   }
-  const disarm = () => { armed = null; draw = null; kb = null; overlay.style.pointerEvents = 'none'; overlay.style.cursor = '' }
+  const disarm = () => {
+    const was = armed
+    armed = null; draw = null; kb = null
+    glCanvas.style.cursor = ''
+    if (was) onArmChange?.(null)
+  }
 
   function removeSelected() {
     if (selected < 0) return
@@ -167,20 +172,23 @@ export function createRoiTool({ nv, overlay, glCanvas, getVol, onChange, isMagne
   const clear = () => { rois.length = 0; selected = -1; onChange?.(rois, selected) }
   const select = (i) => { selected = i; onChange?.(rois, selected) }
 
-  /* ---------- mouse ---------- */
-  overlay.addEventListener('contextmenu', (e) => e.preventDefault())
-  overlay.addEventListener('pointerdown', (e) => {
+  /* ---------- mouse ----------
+     Os handlers ficam no próprio canvas (o overlay nunca recebe ponteiro):
+     assim a ROI intercepta apenas o botão esquerdo, e roda, botão direito e
+     do meio continuam percorrendo cortes, dando zoom e janelando. */
+  glCanvas.addEventListener('pointerdown', (e) => {
     if (!armed || e.button !== 0) return
     const info = pxInfo(evPx(e))
     if (!info) return
-    e.preventDefault()
-    overlay.setPointerCapture(e.pointerId)
+    e.preventDefault(); e.stopImmediatePropagation() // impede o NiiVue de arrastar junto
+    glCanvas.setPointerCapture(e.pointerId)
     const ax = AXIS[info.acs]
     const uv = [info.mm[ax.u], info.mm[ax.v]]
     draw = { kind: armed, acs: info.acs, planeMM: info.mm[ax.n], start: uv, cur: uv, pts: [uv], lastPx: evPx(e) }
-  })
-  overlay.addEventListener('pointermove', (e) => {
+  }, true)
+  glCanvas.addEventListener('pointermove', (e) => {
     if (!draw) return
+    e.preventDefault(); e.stopImmediatePropagation()
     let px = evPx(e)
     if (draw.kind === 'lasso' && isMagnet?.() && Math.hypot(px[0] - draw.lastPx[0], px[1] - draw.lastPx[1]) > 2) {
       px = snapMagnet(px, draw.lastPx)
@@ -194,9 +202,10 @@ export function createRoiTool({ nv, overlay, glCanvas, getVol, onChange, isMagne
       const last = draw.pts[draw.pts.length - 1]
       if (Math.hypot(uv[0] - last[0], uv[1] - last[1]) > 0.4) { draw.pts.push(uv); draw.lastPx = px }
     }
-  })
-  overlay.addEventListener('pointerup', (e) => {
+  }, true)
+  glCanvas.addEventListener('pointerup', (e) => {
     if (!draw || e.button !== 0) return
+    e.preventDefault(); e.stopImmediatePropagation()
     const d = draw; draw = null
     if (d.kind === 'ellipse') {
       const a = Math.abs(d.cur[0] - d.start[0]) / 2, b = Math.abs(d.cur[1] - d.start[1]) / 2

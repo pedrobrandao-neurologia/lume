@@ -23,11 +23,13 @@
   <nav class="tools" aria-label="Ferramentas">
     <div class="tool-group" role="group" aria-label="Interação"
          title="Clique com o botão do mouse desejado para associar a ferramenta: esquerdo (E), direito (D) ou do meio (M)">
-      <button class="tool active" id="toolCrosshair" data-tool="crosshair" title="Cursor / localizador — clique com o botão do mouse (esq/dir/meio) que deseja usar">✛ Cursor</button>
+      <button class="tool" id="toolBrowse" data-tool="browse" title="Percorrer cortes arrastando (padrão do botão esquerdo) — clique com o botão do mouse que deseja usar">⇕ Cortes</button>
+      <button class="tool" id="toolCrosshair" data-tool="crosshair" title="Cursor / localizador — clique com o botão do mouse (esq/dir/meio) que deseja usar">✛ Cursor</button>
       <button class="tool" id="toolWindow" data-tool="windowing" title="Janelamento (← → largura, ↑ ↓ centro) — clique com o botão do mouse que deseja usar">◐ Janela</button>
-      <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância — clique com o botão do mouse que deseja usar">⟷ Medir</button>
-      <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo (dois traços) — clique com o botão do mouse que deseja usar">∠ Ângulo</button>
+      <button class="tool" id="toolMeasure" data-tool="measurement" title="Medir distância: arraste sobre a imagem. O valor entra no painel Medidas. Clique aqui com o botão do mouse que deseja usar.">⟷ Medir</button>
+      <button class="tool" id="toolAngle" data-tool="angle" title="Medir ângulo em dois passos: 1) arraste o primeiro traço (o vértice fica no FIM dele); 2) solte, mova o mouse e clique para fechar. Esc cancela.">∠ Ângulo</button>
       <button class="tool" id="toolPan" data-tool="pan" title="Mover imagem — clique com o botão do mouse que deseja usar">✥ Mover</button>
+      <button class="tool" id="toolZoom" data-tool="zoom" title="Zoom arrastando (padrão do botão direito) — clique com o botão do mouse que deseja usar">⌕ Zoom</button>
       <button class="tool" id="toolRoiEllipse" title="ROI elíptica com estatística (média, DP, área) — arraste no painel esquerdo · tecla E">◯ ROI</button>
       <button class="tool" id="toolRoiLasso" title="ROI de traçado livre (laço) — arraste, ou desenhe com o teclado: setas movem, Espaço marca ponto, Enter fecha · tecla L">✎ Laço</button>
       <span class="tools-hint" title="E = botão esquerdo · D = direito · M = do meio">mouse: E·D·M</span>
@@ -118,6 +120,19 @@
       </div>
     </section>
 
+    <section class="panel" id="panelMeasures">
+      <h3>Medidas <button id="btnClearMeasures" class="mini">limpar</button></h3>
+      <ol class="measures mono" id="measureList"><li class="empty">Nenhuma medida ainda.</li></ol>
+      <p class="hint">⟷ Medir (M): arraste. ∠ Ângulo (A): arraste o 1º traço, solte, mova e clique para fechar. Esc cancela.</p>
+    </section>
+
+    <section class="panel" id="panelRoi">
+      <h3>ROI <button id="btnClearRois" class="mini">limpar</button></h3>
+      <label class="check"><input type="checkbox" id="roiMagnet" /> Caneta magnética (ajusta o traço à borda)</label>
+      <ol class="measures mono" id="roiList"><li class="empty">Nenhuma ROI ainda.</li></ol>
+      <p class="hint">◯ ROI: arraste a elipse. ✎ Laço: arraste o traçado livre — ou desenhe pelo teclado: setas movem o cursor (Shift acelera), Espaço marca ponto, Backspace desfaz, Enter fecha, Esc cancela, Del remove a selecionada. Estatística: média, DP, mín, máx e área.</p>
+    </section>
+
     <section class="panel" id="panelMip">
       <h3>Projeção — thick slab</h3>
       <div class="row">
@@ -152,13 +167,6 @@
       <p class="hint">Gira o volume em torno do cursor atual (interpolação trilinear) e reamostra: os cortes do MPR viram planos oblíquos. Ângulos em relação ao volume original; o thick slab pode ser aplicado sobre o resultado.</p>
     </section>
 
-    <section class="panel" id="panelRoi">
-      <h3>ROI <button id="btnClearRois" class="mini">limpar</button></h3>
-      <label class="check"><input type="checkbox" id="roiMagnet" /> Caneta magnética (ajusta o traço à borda)</label>
-      <ol class="measures mono" id="roiList"><li class="empty">Nenhuma ROI ainda.</li></ol>
-      <p class="hint">◯ ROI: arraste a elipse. ✎ Laço: arraste o traçado livre — ou desenhe pelo teclado: setas movem o cursor (Shift acelera), Espaço marca ponto, Backspace desfaz, Enter fecha, Esc cancela, Del remove a selecionada. Estatística no painel esquerdo: média, DP, mín, máx e área.</p>
-    </section>
-
     <section class="panel" id="panel3d" hidden>
       <h3>3D</h3>
       <label class="grow">Sombreamento
@@ -168,15 +176,10 @@
           <option value="-1">Acúmulo (raios-X)</option>
         </select>
       </label>
-      <label class="rangeRow">Plano de corte
-        <input type="range" id="clip" min="-1" max="1" step="0.02" value="2" />
+      <label class="rangeRow">Plano de corte <span class="mono" id="clipVal">desligado</span>
+        <input type="range" id="clip" min="-1" max="2" step="0.02" value="2" />
       </label>
-      <p class="hint">Arraste para girar. O plano de corte remove a metade anterior do volume conforme o controle.</p>
-    </section>
-
-    <section class="panel" id="panelMeasures">
-      <h3>Medidas <button id="btnClearMeasures" class="mini">limpar</button></h3>
-      <ol class="measures mono" id="measureList"><li class="empty">Nenhuma medida ainda.</li></ol>
+      <p class="hint">Arraste para girar. O plano de corte remove a metade anterior do volume; no extremo direito fica desligado.</p>
     </section>
 
     <section class="panel" id="panelMeta">
@@ -222,6 +225,14 @@
     botões esquerdo, do meio, direito e em Ctrl/Shift+esquerdo. No painel 3D, o arrasto com o botão
     esquerdo gira o volume.</p>
 
+  <h3>Como medir</h3>
+  <table class="help-table"><tbody>
+    <tr><td>Distância</td><td>Ative <strong>⟷ Medir</strong> (tecla M) e arraste sobre a imagem. O valor entra no painel <em>Medidas</em>.</td></tr>
+    <tr><td>Ângulo</td><td>Ative <strong>∠ Ângulo</strong> (tecla A) e faça em dois passos: <strong>1)</strong> arraste o primeiro traço — o vértice do ângulo fica no <em>fim</em> dele; <strong>2)</strong> solte o botão, mova o mouse (sem apertar) e <strong>clique</strong> para fechar. O valor em graus entra no painel <em>Medidas</em>.</td></tr>
+    <tr><td>Esc</td><td>Cancela um ângulo pela metade; apertado de novo, sai da ferramenta de medida e volta a percorrer cortes.</td></tr>
+    <tr><td>Limpar</td><td>O botão <em>limpar</em> do painel Medidas apaga a lista <strong>e</strong> os traços desenhados sobre a imagem.</td></tr>
+  </tbody></table>
+
   <h3>Roda do mouse</h3>
   <table class="help-table"><tbody>
     <tr><td>Roda vertical</td><td>Percorre os cortes do painel sob o mouse (cada painel tem também uma barra de rolagem própria)</td></tr>
@@ -238,7 +249,7 @@
 
   <h3>Teclado</h3>
   <table class="help-table"><tbody>
-    <tr><td>C · J · M · A · V</td><td>Cursor · Janela · Medir · Ângulo · Mover no botão esquerdo</td></tr>
+    <tr><td>B · C · J · M · A · V · Z</td><td>Cortes · Cursor · Janela · Medir · Ângulo · Mover · Zoom no botão esquerdo</td></tr>
     <tr><td>1–7</td><td>Presets de janela de TC (cérebro, subdural, AVC, osso, pulmão, mediastino, abdome)</td></tr>
     <tr><td>0</td><td>Janela automática</td></tr>
     <tr><td>E · L</td><td>ROI elíptica · Laço (traçado livre)</td></tr>

@@ -136,8 +136,11 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 /* painel focado: recebe as miniaturas clicadas e as trocas de corte */
 .stage canvas.focused { outline: 1.5px solid var(--amber); outline-offset: -1.5px; }
 /* overlay das ROIs — cobre exatamente o canvas do painel esquerdo */
-#roiOverlay { position: absolute; left: 0; top: 0; z-index: 4; pointer-events: none; }
-.dropzone { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; }
+/* só desenho: os eventos da ROI são tratados no próprio canvas do painel 1 */
+#roiOverlay { position: absolute; left: 0; top: 0; z-index: 4; pointer-events: none !important; }
+/* pointer-events: none — o alvo do arrasto é o .stage; sem isto a caixa,
+   se ficar visível, engole todos os gestos do mouse sobre a imagem */
+.dropzone { position: absolute; inset: 0; display: grid; place-items: center; z-index: 5; pointer-events: none; }
 .dropzone.hidden { display: none; }
 .dropzone.hover .dz-card { border-color: var(--amber); }
 .dz-card {
@@ -152,6 +155,12 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
 /* inspetor */
 .inspector { overflow-y: auto; background: var(--surface); border-left: 1px solid var(--line); padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .panel { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; }
+/* destaque momentâneo quando um resultado novo chega ao painel */
+.panel.flash { animation: panelFlash 1s ease-out; }
+@keyframes panelFlash {
+  0%, 55% { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber), 0 0 18px -6px rgba(242, 180, 65, 0.8); }
+  100% { border-color: var(--line); box-shadow: none; }
+}
 .panel h3 { margin: 0 0 8px; font: 600 12px var(--disp); text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim); display: flex; align-items: center; }
 .row { display: flex; gap: 8px; align-items: end; margin-bottom: 8px; }
 .row:last-child { margin-bottom: 0; }
@@ -240,4 +249,4 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
   .panel { min-width: 230px; }
   .brand-sub { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

@@ -287,8 +287,11 @@ export async function directSeriesToNifti(group, onProgress) {
   v.setFloat32(76, 1, true)
   v.setFloat32(80, ps[1], true); v.setFloat32(84, ps[0], true); v.setFloat32(88, dz, true)
   v.setFloat32(108, 352, true) // vox_offset
-  v.setFloat32(112, first['00281053'] ?? 1, true) // scl_slope
-  v.setFloat32(116, first['00281052'] ?? 0, true) // scl_inter
+  // tags de rescale ausentes ou malformadas viram NaN em parseFloat — e um
+  // scl_slope NaN transforma o volume inteiro em NaN
+  const num = (x, def) => (Number.isFinite(x) ? x : def)
+  v.setFloat32(112, num(first['00281053'], 1), true) // scl_slope
+  v.setFloat32(116, num(first['00281052'], 0), true) // scl_inter
   v.setInt16(254, 1, true) // sform_code
   for (let r = 0; r < 3; r++) for (let c = 0; c < 4; c++) v.setFloat32(280 + (r * 4 + c) * 4, srow[r][c], true)
   new Uint8Array(hdr, 344, 4).set([0x6e, 0x2b, 0x31, 0]) // "n+1"
