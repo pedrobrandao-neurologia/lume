@@ -5,6 +5,8 @@
 // (Little Endian implícito/explícito), que monta o volume corte a corte com o
 // mínimo de memória, sem passar pelo conversor WASM.
 
+import { geometryFromIOP, cross } from './orient.js'
+
 const TS_IMPLICIT = '1.2.840.10008.1.2'
 const TS_EXPLICIT_LE = '1.2.840.10008.1.2.1'
 
@@ -21,6 +23,7 @@ const WANT = {
   '00180081': 'n', // EchoTime (ms)
   '00180082': 'n', // InversionTime (ms)
   '00180087': 'n', // MagneticFieldStrength
+  '00181120': 'n', // GantryDetectorTilt
   '00181030': 's', // ProtocolName
   '0020000e': 's', // SeriesInstanceUID
   '00200011': 'n', // SeriesNumber
@@ -193,6 +196,10 @@ export async function scanDicomSeries(files, onProgress) {
           sidecar: sidecarFrom(t),
           files: [], items: [], bytes: 0, count: 0,
           ts: h.ts,
+          // plano derivado do sistema de coordenadas do paciente (IOP), nunca
+          // da descrição da série
+          geometry: geometryFromIOP(t['00200037']),
+          tilt: Number.isFinite(t['00181120']) ? t['00181120'] : 0,
           supportedDirect:
             (h.ts === TS_IMPLICIT || h.ts === TS_EXPLICIT_LE) &&
             (t['00280002'] ?? 1) === 1 &&
@@ -215,7 +222,6 @@ export async function scanDicomSeries(files, onProgress) {
 }
 
 /* ---------------- leitura direta DICOM → NIfTI ---------------- */
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 /**
@@ -297,5 +303,5 @@ export async function directSeriesToNifti(group, onProgress) {
   new Uint8Array(hdr, 344, 4).set([0x6e, 0x2b, 0x31, 0]) // "n+1"
 
   const name = `${(group.desc || 'serie').replace(/[^\w\-]+/g, '_').slice(0, 60) || 'serie'}.nii`
-  return { file: new File([hdr, out.buffer], name), sidecar: group.sidecar }
+  return { file: new File([hdr, out.buffer], name), sidecar: group.sidecar, geometry: group.geometry }
 }

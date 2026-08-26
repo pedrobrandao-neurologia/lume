@@ -66,13 +66,26 @@ Padrão estilo workstation — todos os gestos podem ser trocados no diálogo ab
 - No painel **3D**, o arrasto esquerdo gira o volume.
 - O **tutorial em português** (botão **?**) documenta todos os gestos e atalhos — e é também a tela de customização: cada linha da tabela tem um seletor que troca a ação ao vivo.
 
-### 5. Janelamento
+### 5. Orientação clínica e lateralidade
+
+| Recurso | Como funciona |
+|---|---|
+| Convenção de exibição | **Radiológica por padrão** (padrão de PACS): a esquerda do paciente aparece **à direita da tela** em axial e coronal — axial visto pelos pés, coronal visto de frente. O sagital é visto pelo lado esquerdo do paciente (nariz à esquerda), idêntico nas duas convenções. |
+| Convenção neurológica | Disponível no seletor da barra (FSL/SPM: esquerda do paciente à esquerda da tela). O selo do rodapé fica **vermelho** nesse modo — uma inversão silenciosa é erro de lateralidade em potencial. A escolha fica salva no navegador. |
+| Marcadores | Letras nas **quatro bordas** de cada painel (R, L, A, P, S, I) em âmbar, mais um **selo permanente** no rodapé do palco mostrando qual lado da tela corresponde a qual lado do paciente. |
+| Fonte da verdade | A orientação vem **sempre da matriz afim** do volume (DICOM LPS → NIfTI RAS), nunca do nome da série nem da ordem dos arquivos. Os cortes são ordenados pela projeção do `ImagePositionPatient` sobre a normal do plano, não por `InstanceNumber`. |
+| Plano detectado | O painel Série mostra o plano (axial/coronal/sagital), o grau de obliquidade quando houver, e os códigos de eixo da afim (ex.: `RAS`). Aquisições oblíquas são exibidas no plano de aquisição, com as letras da direção anatômica dominante. |
+| Gantry tilt | Detectado por `GantryDetectorTilt (0018,1120)`; a barra de status avisa quando ≠ 0, pois o MPR pode sair cisalhado. |
+
+Validado com um volume assimétrico sintético percorrendo **as 48 combinações possíveis de orientação** (6 permutações de eixos × 8 de sinais): em todas, a marca colocada na direita do paciente é lida no lado anatômico correto e exibida no lado certo da tela.
+
+### 6. Janelamento
 
 - Arraste com o gesto configurado para *Janela*; campos numéricos Centro/Largura (WL/WW).
 - **Presets de TC** com atalhos de teclado: `1` cérebro · `2` subdural · `3` AVC · `4` osso · `5` pulmão · `6` mediastino · `7` abdome · `0` janela automática (percentis robustos). Valores em unidades Hounsfield calibradas (`scl_slope/inter` do NIfTI) [4].
 - Mapas de cor e reset de vista.
 
-### 6. Medidas e ROIs quantitativas
+### 7. Medidas e ROIs quantitativas
 
 - **Distância** (mm/cm) e **ângulo** direto sobre a imagem, com lista no painel lateral.
 - **ROI elíptica** (`E`): arraste no painel principal; média, desvio-padrão, mínimo, máximo, N de amostras e **área** (πab).
@@ -80,13 +93,13 @@ Padrão estilo workstation — todos os gestos podem ser trocados no diálogo ab
 - **Caneta magnética** (opcional): cada ponto do traço é atraído para a borda de maior gradiente na direção normal ao traço — o mesmo princípio dos "intelligent scissors"/livewire [8].
 - A estatística amostra o volume em exibição **no espaço mm do corte** (independe do zoom da tela); em TC os valores saem em HU. As ROIs ficam ancoradas à fatia em que foram traçadas (somem ao rolar e reaparecem ao voltar).
 
-### 7. Reconstruções
+### 8. Reconstruções
 
 - **Thick slab** com três modos — **MIP** (máximo: vasos, nódulos) [5,6], **MinIP** (mínimo: enfisema, vias aéreas e biliares) e **média** (redução de ruído) [7] — em bloco deslizante ao longo de eixo com rótulo anatômico, espessura em mm, O(n) por linha (fila monotônica / soma deslizante), desfazível.
 - **MPR oblíquo**: rotações L–R, A–P e S–I (−90° a +90°) **em torno do cursor atual**, por reamostragem trilinear na grade original — os cortes ortogonais do visualizador viram planos oblíquos do exame [7]. O thick slab pode ser aplicado sobre o resultado; "Original" desfaz. Processamento em blocos com barra de progresso.
 - **3D volume rendering** (WebGL2) com sombreamento por gradiente e plano de corte.
 
-### 8. PWA e privacidade
+### 9. PWA e privacidade
 
 - Instalável; funciona offline após a primeira visita (pré-cache versionado por service worker).
 - **Nenhum dado sai do computador**: sem telemetria, sem upload, sem cookies de terceiros. A única persistência local é a configuração de gestos do mouse (`localStorage`).
@@ -127,6 +140,7 @@ js/app.js                    estado, painéis 1–4 sincronizados, gestos do mou
 js/ingest.js                 DICOM→NIfTI (dcm2niix WASM) · NIfTI direto · ZIP
 js/zip-read.js               leitor ZIP com DecompressionStream, sem dependências
 js/thumbs.js                 miniaturas lendo só cabeçalho + corte central (streaming)
+js/orient.js                 orientação clínica (LPS/RAS, plano, convenção de exibição)
 js/mip.js                    thick slab MIP/MinIP/média (fila monotônica / soma deslizante)
 js/roi.js                    ROIs (elipse, laço com caneta magnética, teclado) + estatística
 js/oblique.js                MPR oblíquo (reamostragem trilinear em torno do cursor)
@@ -157,6 +171,9 @@ O caminho de ingestão (dcm2niix WASM + NiiVue) é reaproveitado do
 | 0.4 | ROI elíptica e laço com caneta magnética (mouse e teclado); MPR oblíquo |
 | 0.5 | Comparação em 1–4 painéis, cada um com série e corte próprios |
 | 0.6 | Barra de cortes por painel; gestos de mouse estilo workstation customizáveis; tutorial (?) |
+| 0.7 | Triagem de estudos DICOM: seleção de séries, leitura direta e conversão por série |
+| 0.8 | Correção da ferramenta de ângulo e de uma série de bugs de experiência de uso |
+| 0.9 | Orientação clínica: convenção radiológica (PACS) por padrão, marcadores R/L e detecção pela afim |
 
 ## Limitações conhecidas
 

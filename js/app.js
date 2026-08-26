@@ -9,9 +9,10 @@ import { makeThumb } from './thumbs.js'
 import { slabProject, axisLabels } from './mip.js'
 import { createRoiTool } from './roi.js'
 import { bakeOblique } from './oblique.js'
+import { CONVENCOES, bordasDaTela, planeFromAffine } from './orient.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.8.0'
+const VERSION = '0.9.0'
 
 const state = {
   nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
@@ -24,6 +25,7 @@ const state = {
   origVol: null,       // NVImage original da série ativa (p/ desfazer o oblíquo)
   roi: null,           // controlador de ROIs
   busy: false,         // reconstrução pesada em andamento (MIP/oblíquo)
+  convencao: 'radiologica', // orientação de exibição (padrão de PACS)
   cache: new Map(),    // id → NVImage (limitado, para trocar de série sem reconverter)
   measures: [],
   mouse: null, // gestos do mouse → ação (carregado de MOUSE_DEFAULTS + localStorage)
@@ -116,6 +118,49 @@ async function initViewer() {
   await ensurePanel(0) // registra o visualizador como painel principal
 }
 
+/* ---------------- orientação clínica ---------------- */
+// A convenção de exibição vale para TODOS os painéis. Radiológica (padrão de
+// PACS): a esquerda do paciente aparece à direita da tela em axial e coronal;
+// o sagital é idêntico nas duas convenções. A orientação vem sempre da matriz
+// afim do volume (LPS→RAS), nunca do nome da série ou da ordem dos arquivos.
+function applyOrientation(nv) {
+  const c = CONVENCOES[state.convencao] || CONVENCOES.radiologica
+  nv.opts.isRadiologicalConvention = c.isRadiologicalConvention
+  nv.opts.sagittalNoseLeft = true          // sagital visto pelo lado esquerdo: nariz à esquerda
+  nv.opts.showAllOrientationMarkers = true // as quatro bordas, não só duas
+  nv.opts.isOrientationTextVisible = true
+  nv.opts.fontColor = [1, 0.86, 0.55, 1]   // âmbar claro: legível sobre osso e ar
+  nv.opts.textHeight = 0.06                // letras de borda bem legíveis
+  nv.opts.isCornerOrientationText = false
+}
+
+/** Troca a convenção em todos os painéis e avisa de forma inequívoca. */
+function setConvencao(nome, silencioso = false) {
+  if (!CONVENCOES[nome]) return
+  state.convencao = nome
+  try { localStorage.setItem('lume-convencao', nome) } catch { /* sem storage */ }
+  for (const p of state.panels.filter(Boolean)) { applyOrientation(p.nv); p.nv.drawScene() }
+  renderOrientBadge()
+  if (!silencioso) {
+    const c = CONVENCOES[nome]
+    log(`Orientação ${c.label}: ${c.hint}.`)
+  }
+}
+
+/** Selo permanente com a lateralidade — nunca deixar dúvida sobre R/L. */
+function renderOrientBadge() {
+  const el = $('orientBadge')
+  if (!el) return
+  const rad = CONVENCOES[state.convencao].isRadiologicalConvention
+  const [esq, dir] = bordasDaTela('axial', rad)
+  el.innerHTML = `<span class="ob-side">${esq}</span>` +
+    `<span class="ob-mid">${CONVENCOES[state.convencao].label}</span>` +
+    `<span class="ob-side">${dir}</span>`
+  el.title = `${CONVENCOES[state.convencao].label} — ${CONVENCOES[state.convencao].hint}. ` +
+    `Em axial e coronal, ${esq} fica à esquerda da tela e ${dir} à direita; o sagital é igual nas duas convenções.`
+  el.dataset.conv = state.convencao
+}
+
 /* ---------------- medidas: distância e ângulo ---------------- */
 // Traço e rótulo em âmbar (o vermelho padrão do NiiVue some sobre imagem
 // clara) e texto maior — a medida precisa ser legível à distância da tela.
@@ -199,6 +244,7 @@ async function ensurePanel(i) {
     nv.opts.yoke3Dto2DZoom = true
   }
   styleMeasurements(nv)
+  applyOrientation(nv)
   const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i] }
   state.panels[i] = panel
   canvas.addEventListener('pointerdown', () => focusPanel(i))
@@ -823,9 +869,19 @@ async function openSeries(id) {
 function renderMeta(entry, vol) {
   const sc = entry.sidecar
   const dims = vol.hdr.dims, pd = vol.hdr.pixDims
+  // plano e códigos de eixo vêm da matriz afim (LPS→RAS), nunca do nome da série
+  let orient = null
+  try {
+    const { codes, plane } = planeFromAffine(vol.hdr.affine)
+    state.axCodes = codes.join('')
+    const nomes = { axial: 'Axial', coronal: 'Coronal', sagital: 'Sagital' }
+    const obl = entry.geometry?.obliqueDeg
+    orient = `${nomes[plane] || plane}${obl > 3 ? ` · oblíquo ${fmt(obl, 0)}°` : ''} (${codes.join('')})`
+  } catch { /* afim ausente */ }
   const rows = [
     ['Descrição', sc.SeriesDescription || entry.file.name],
     ['Modalidade', sc.Modality || '—'],
+    ['Orientação', orient],
     ['Matriz', `${dims[1]}×${dims[2]}×${dims[3]}${dims[0] >= 4 && dims[4] > 1 ? `×${dims[4]}` : ''}`],
     ['Voxel', `${fmt(Math.abs(pd[1]), 2)}×${fmt(Math.abs(pd[2]), 2)}×${fmt(Math.abs(pd[3]), 2)} mm`],
     ['Espessura', sc.SliceThickness ? `${sc.SliceThickness} mm` : null],
@@ -1084,12 +1140,17 @@ async function handleDicoms(dicoms) {
       let series
       if (plan.direct && g.supportedDirect) {
         log(`${tag}: lendo DICOM diretamente (${g.count} cortes)…`)
-        const { file, sidecar } = await directSeriesToNifti(g, (k, n) =>
+        const { file, sidecar, geometry } = await directSeriesToNifti(g, (k, n) =>
           progress(0.2 + 0.78 * ((i + k / n) / plan.selected.length)))
-        series = [makeEntry(file, sidecar, 'dicom')]
+        const e = makeEntry(file, sidecar, 'dicom')
+        e.geometry = geometry
+        series = [e]
       } else {
         log(`${tag}: ${plan.direct ? 'sem suporte à leitura direta — ' : ''}convertendo (${g.count} arquivos)…`)
         series = await convertDicom(g.files, log)
+      }
+      if (Math.abs(g.tilt || 0) > 0.5) {
+        log(`${tag}: gantry inclinado ${fmt(g.tilt, 1)}° — o MPR pode sair cisalhado.`)
       }
       await addSeries(series)
       opened += series.length
@@ -1162,6 +1223,7 @@ function bind() {
     s.value = state.mouse[s.dataset.gesture]
     s.onchange = () => assignTool(s.dataset.gesture, s.value)
   })
+  $('convencao').onchange = () => setConvencao($('convencao').value)
   $('btnHelp').onclick = () => { applyMouseConfig(); $('dlgHelp').showModal() }
   $('btnHelpClose').onclick = () => $('dlgHelp').close()
   $('btnMouseDefaults').onclick = () => {
@@ -1281,6 +1343,12 @@ state.roi = createRoiTool({
 })
 bind()
 buildSliceBars()
+try {
+  const salva = localStorage.getItem('lume-convencao')
+  if (salva && CONVENCOES[salva]) state.convencao = salva
+} catch { /* sem storage */ }
+$('convencao').value = state.convencao
+setConvencao(state.convencao, true)
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(() => {})
 }
