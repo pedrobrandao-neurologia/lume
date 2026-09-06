@@ -48,6 +48,10 @@
       <button class="tool" data-layout="3" title="3 painéis">☰3</button>
       <button class="tool" data-layout="4" title="4 painéis (2×2)">⊞</button>
     </div>
+    <div class="tool-group" role="group" aria-label="Sincronização entre séries">
+      <button class="tool active" id="btnSyncPosition" aria-pressed="true" title="Vincular a posição física em mm entre séries. Não realiza registro de imagens; desligue para exames sem alinhamento espacial.">Vincular posição</button>
+      <button class="tool active" id="btnSyncZoom" aria-pressed="true" title="Vincular zoom, deslocamento e câmera 3D; o contraste permanece independente.">Vincular zoom</button>
+    </div>
     <label class="conv-pick" title="Convenção de exibição. Radiológica é o padrão de PACS: a esquerda do paciente aparece à direita da tela em axial e coronal.">
       <select id="convencao">
         <option value="radiologica" selected>Radiológica</option>

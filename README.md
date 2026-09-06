@@ -40,6 +40,9 @@ O Lume reproduz, dentro de uma página web estática, o essencial de uma worksta
 - **Cursor, scroll de cortes, pan/zoom e câmera 3D sincronizados em coordenadas mm** entre todos os painéis — a orientação do corte, de propósito, **não** é sincronizada: cada painel pode exibir **série e plano próprios** (ex.: coluna em axial, sagital e coronal simultaneamente; ou exame atual × anterior). Clicar numa lesão em qualquer painel a localiza em todos.
 - **Painel focado** (contorno âmbar): clique num painel para focá-lo; a miniatura clicada e os botões MPR/Ax/Cor/Sag/3D valem para ele. Painéis recém-abertos recebem a série ativa em sagital/coronal/axial (hanging básico com um clique).
 - **Barra de cortes por painel**: barra de rolagem vertical própria na borda direita de cada painel, com indicador *corte/total*, ligada ao eixo do plano exibido.
+- **Vincular posição / Vincular zoom**: controles independentes para a localização em mm e para pan/zoom/câmera. Ao religar um vínculo, o painel focado passa a ser a referência. A sincronização usa a geometria dos arquivos; **não faz registro de imagens** nem corrige movimento entre aquisições. Desligue o vínculo de posição para exames sem alinhamento espacial.
+- Ao trocar a sequência, a posição física é preservada, inclusive no painel principal. Se a posição estiver fora da cobertura de outra série, sua barra indica **Fora do FOV**, sem substituir a localização por um corte de borda.
+- No MPR, arrastar para percorrer cortes respeita o plano sob o mouse (axial, coronal ou sagital). Clique, roda e barra de cortes selecionam o painel usado.
 - A janela (brilho/contraste) é independente por painel.
 - O painel 1 é o **principal**: ROIs, janela por teclado, thick slab, MPR oblíquo e metadados operam sobre ele.
 
@@ -217,3 +220,7 @@ Código do Lume sob licença MIT (`LICENSE`).
 10. NiiVue — biblioteca de visualização de neuroimagem em WebGL2 [software]. Rorden Lab e colaboradores. <https://github.com/niivue/niivue>
 11. Ziegler E, Urban T, Brown D, et al. Open Health Imaging Foundation Viewer: an extensible open-source framework for building web-based imaging applications to support cancer research. *JCO Clin Cancer Inform*. 2020;4:336–345. doi:10.1200/CCI.19.00131
 12. Medixant. RadiAnt DICOM Viewer [software]. <https://www.radiantviewer.com>
+
+## Testes de regressão
+
+Execute `node --test tests/sync.test.mjs` (Node.js 20 ou superior). Os testes cobrem coordenadas físicas entre geometrias diferentes, vínculos independentes, cobertura, navegação MPR e carregamentos concorrentes. A revisão visual no navegador com WebGL2 e a conferência com séries de RM representativas continuam necessárias antes da integração.
