@@ -198,7 +198,7 @@ label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; colo
   cursor: ns-resize; opacity: 0.55;
 }
 .slice-ctl:hover input[type=range] { opacity: 1; }
-.slice-ctl span { font-size: 9.5px; color: var(--dim); background: rgba(10,12,14,.7); padding: 0 3px; border-radius: 3px; }
+.slice-ctl span { align-self: flex-end; white-space: nowrap; font-size: 9.5px; color: var(--dim); background: rgba(10,12,14,.7); padding: 0 3px; border-radius: 3px; }
 
 /* diálogo de seleção de séries (triagem de memória) */
 #dlgSeries {

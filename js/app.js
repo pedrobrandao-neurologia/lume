@@ -12,11 +12,13 @@ import { bakeOblique } from './oblique.js'
 import { CONVENCOES, bordasDaTela, planeFromAffine } from './orient.js'
 
 const $ = (id) => document.getElementById(id)
-const VERSION = '0.9.0'
+const VERSION = '0.9.1'
 
 const state = {
   nv: null,            // visualizador do painel principal (nº 1) — ROI, janela, slab, oblíquo
   panels: [],          // {nv, canvas, id: seriesId, view} — painéis de comparação (índice 0 = principal)
+  syncPosition: true,
+  syncZoom: true,
   layout: 1,           // nº de painéis visíveis (1–4)
   focus: 0,            // painel focado: recebe as trocas de corte e as séries clicadas
   series: [],          // SeriesEntry[]
@@ -226,8 +228,14 @@ function cancelPendingAngle(quiet = false) {
 const PANEL_CANVAS = ['gl', 'gl2', 'gl3', 'gl4']
 const DEFAULT_VIEWS = ['mpr', 'sagittal', 'coronal', 'axial'] // padrão ao abrir cada painel
 
+const pendingPanels = new Map()
 async function ensurePanel(i) {
   if (state.panels[i]) return state.panels[i]
+  if (!pendingPanels.has(i)) pendingPanels.set(i, createPanel(i).finally(() => pendingPanels.delete(i)))
+  return pendingPanels.get(i)
+}
+
+async function createPanel(i) {
   const canvas = $(PANEL_CANVAS[i])
   let nv
   if (i === 0) {
@@ -243,11 +251,13 @@ async function ensurePanel(i) {
     await nv.attachToCanvas(canvas)
     nv.opts.yoke3Dto2DZoom = true
   }
+  canvas.hidden = i >= state.layout
+  canvas.style.display = i >= state.layout ? 'none' : 'block'
   styleMeasurements(nv)
   applyOrientation(nv)
-  const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i] }
+  const panel = { nv, canvas, id: null, view: DEFAULT_VIEWS[i], loadSeq: 0, loading: false }
   state.panels[i] = panel
-  canvas.addEventListener('pointerdown', () => focusPanel(i))
+  canvas.addEventListener('pointerdown', () => focusPanel(i, true), true)
   installMeasureCallbacks(panel, i)
   installPanelGestures(panel, i)
   // o NiiVue muda o estado do ângulo depois dos nossos handlers: consulta no fim do turno
@@ -262,10 +272,10 @@ async function ensurePanel(i) {
 // religa a sincronização bidirecional (cursor em mm, pan/zoom, câmera 3D)
 // entre todos os painéis visíveis; a orientação de corte NÃO é sincronizada.
 function rewireSync() {
-  const active = state.panels.slice(0, state.layout).filter(Boolean)
-  for (const p of active) {
-    const others = active.filter((q) => q !== p).map((q) => q.nv)
-    p.nv.broadcastTo(others, { '2d': true, '3d': true })
+  const active = state.panels.slice(0, state.layout).filter((p) => p && !p.loading && p.nv.volumes.length)
+  for (const p of state.panels.filter(Boolean)) {
+    const others = active.includes(p) ? active.filter((q) => q !== p).map((q) => q.nv) : []
+    p.nv.broadcastTo(others, { crosshair: state.syncPosition, zoomPan: state.syncZoom, '3d': state.syncZoom })
   }
 }
 
@@ -278,7 +288,9 @@ function applyPanelView(panel) {
   nv.setSliceType(t)
 }
 
+let layoutSeq = 0
 async function setLayout(n) {
+  const seq = ++layoutSeq
   n = Math.max(1, Math.min(4, n))
   state.layout = n
   $('stage').className = `stage layout-${n}`
@@ -291,19 +303,24 @@ async function setLayout(n) {
     // então o display precisa ser gerido aqui também
     c.style.display = i >= n ? 'none' : 'block'
   }
+  rewireSync()
   // painéis que saíram de cena liberam o volume (memória de CPU e GPU)
   for (let i = n; i < 4; i++) {
     const p = state.panels[i]
-    if (!p || !p.id) continue
+    if (!p) continue
+    p.loadSeq++ // invalida também uma abertura que ainda não chegou à GPU
+    p.loading = false
     while (p.nv.volumes.length) p.nv.removeVolume(p.nv.volumes[0])
     p.id = null
   }
   for (let i = 0; i < n; i++) {
     const panel = await ensurePanel(i)
+    if (seq !== layoutSeq) return
     // painel aberto (ou reaberto) sem série: recebe a ativa na orientação padrão
     if (i > 0 && state.activeId && !panel.id) {
       applyPanelView(panel)
       await loadIntoPanel(i, state.activeId)
+      if (seq !== layoutSeq) return
     }
   }
   if (state.focus >= n) focusPanel(0)
@@ -315,9 +332,10 @@ async function setLayout(n) {
   if (n > 1) log(`${n} painéis — clique num painel para focá-lo; miniatura carrega no focado; Ax/Cor/Sag muda o corte do focado.`)
 }
 
-function focusPanel(i) {
+function focusPanel(i, focusCanvas = false) {
   if (i >= state.layout || !state.panels[i]) return
   state.focus = i
+  if (focusCanvas) state.panels[i].canvas.focus({ preventScroll: true })
   document.querySelectorAll('.stage canvas').forEach((c, k) => c.classList.toggle('focused', PANEL_CANVAS[i] === c.id && state.layout > 1))
   const view = state.panels[i].view
   document.querySelectorAll('.tool[data-view]').forEach((b) =>
@@ -330,34 +348,36 @@ async function loadIntoPanel(i, id) {
   const entry = state.series.find((s) => s.id === id)
   const panel = state.panels[i]
   if (!entry || !panel || i === 0) return
+  const seq = ++panel.loadSeq
   log(`Painel ${i + 1}: abrindo ${entry.file.name}…`); progress(0.3)
   try {
     let vol = await volumeFor(entry)
+    if (seq !== panel.loadSeq || i >= state.layout) return
+    const position = positionForLoad(panel)
+    panel.loading = true
+    rewireSync()
     // NVImage já exibido em outro painel: clona para não compartilhar entre contextos GL
     if (state.panels.some((p) => p && p.nv.volumes.includes(vol))) vol = vol.clone()
     const nv = panel.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
-    await nv.addVolume(vol)
+    nv.addVolume(vol)
     panel.id = id
     const v = nv.volumes[0]
     if (entry.sidecar.Modality === 'CT') { v.cal_min = 0; v.cal_max = 80 }
     else { v.cal_min = v.robust_min ?? v.global_min; v.cal_max = v.robust_max ?? v.global_max }
     nv.updateGLVolume()
     applyPanelView(panel)
-    // herda o cursor do painel principal (em mm): um painel recém-aberto deve
-    // mostrar o corte que já está em foco, não o centro do volume
-    const src = state.panels[0]
-    if (src?.nv.volumes.length && src !== panel) {
-      const mm = src.nv.frac2mm(src.nv.scene.crosshairPos)
-      nv.scene.crosshairPos = nv.mm2frac([mm[0], mm[1], mm[2]])
-    }
+    restorePosition(panel, position)
     nv.drawScene()
     markActiveThumbs()
     progress(0)
-    log(`Painel ${i + 1}: ${entry.file.name} (${panel.view}) — cursor sincronizado em mm.`)
+    log(`Painel ${i + 1}: ${entry.file.name} (${panel.view}) — ${state.syncPosition ? 'posição vinculada em mm' : 'posição independente'}.`)
   } catch (err) {
+    if (seq !== panel.loadSeq) return
     console.error(err); progress(0)
     log('Falha ao abrir no painel: ' + err.message)
+  } finally {
+    if (seq === panel.loadSeq) { panel.loading = false; rewireSync() }
   }
 }
 
@@ -389,24 +409,42 @@ function gestureOf(e) {
 
 const VIEW_AXIS = { axial: 2, coronal: 1, sagittal: 0, mpr: 2 } // componente frac RAS do corte
 
-// propaga o cursor deste painel aos demais em mm (mesma semântica do sync)
+// Preserva a localização física, não o índice do corte, entre matrizes diferentes.
+function positionForLoad(panel) {
+  const focused = state.panels[state.focus]
+  const src = state.syncPosition && focused?.nv.volumes.length ? focused
+    : panel.nv.volumes.length ? panel
+    : state.syncPosition ? state.panels.find((p, i) => i < state.layout && p?.nv.volumes.length) : null
+  return src ? Array.from(src.nv.frac2mm(src.nv.scene.crosshairPos)).slice(0, 3) : null
+}
+
+function restorePosition(panel, mm) {
+  if (!mm || !mm.every(Number.isFinite)) return
+  const frac = panel.nv.mm2frac(mm)
+  if (Array.from(frac).every(Number.isFinite)) panel.nv.scene.crosshairPos = frac
+}
+
+// Não limita a posição ao FOV: isso indicaria uma estrutura diferente como correspondente.
 function propagateCrosshair(from) {
-  const mm = from.nv.frac2mm(from.nv.scene.crosshairPos)
-  for (const p of state.panels.slice(0, state.layout)) {
-    if (!p || p === from || !p.nv.volumes.length) continue
-    p.nv.scene.crosshairPos = p.nv.mm2frac([mm[0], mm[1], mm[2]])
-    p.nv.drawScene()
+  if (!from.nv.volumes.length) return
+  if (state.syncPosition) {
+    const mm = Array.from(from.nv.frac2mm(from.nv.scene.crosshairPos)).slice(0, 3)
+    for (const p of state.panels.slice(0, state.layout)) {
+      if (!p || p === from || p.loading || !p.nv.volumes.length) continue
+      restorePosition(p, mm)
+      p.nv.drawScene()
+      p.nv.createOnLocationChange?.()
+    }
   }
   from.nv.createOnLocationChange?.()
 }
 
-function stepSlice(panel, dir) {
-  const axis = VIEW_AXIS[panel.view]
+function stepSlice(panel, dir, axis = VIEW_AXIS[panel.view]) {
   const vol = panel.nv.volumes[0]
   if (axis === undefined || !vol) return
   const dim = vol.dimsRAS?.[axis + 1] || vol.hdr.dims[axis + 1] || 1
   const f = panel.nv.scene.crosshairPos.slice()
-  f[axis] = Math.min(1, Math.max(0, f[axis] + dir / dim))
+  f[axis] = Math.min(1 - 0.5 / dim, Math.max(0.5 / dim, f[axis] + dir / dim))
   panel.nv.scene.crosshairPos = f
   panel.nv.drawScene()
   propagateCrosshair(panel)
@@ -505,8 +543,8 @@ function installPanelGestures(panel, idx) {
     if (drag.act === 'browse') {
       drag.acc += dy
       const step = 5 * dpr()
-      while (drag.acc >= step) { stepSlice(panel, -1); drag.acc -= step }
-      while (drag.acc <= -step) { stepSlice(panel, 1); drag.acc += step }
+      while (drag.acc >= step) { stepSlice(panel, -1, [2, 1, 0][drag.acs]); drag.acc -= step }
+      while (drag.acc <= -step) { stepSlice(panel, 1, [2, 1, 0][drag.acs]); drag.acc += step }
     } else if (drag.act === 'zoom') zoomPanel(panel, Math.exp(-dy * 0.004))
     else if (drag.act === 'windowing') windowPanel(panel, dx, dy)
     else if (drag.act === 'pan') panPanel(panel, dx, dy, drag.mmpp, drag.acs)
@@ -533,6 +571,7 @@ function installPanelGestures(panel, idx) {
   // roda horizontal = série anterior/seguinte
   let wheelLock = 0
   canvas.addEventListener('wheel', (e) => {
+    focusPanel(idx, true)
     if (e.ctrlKey) {
       e.preventDefault(); e.stopImmediatePropagation()
       zoomPanel(panel, Math.exp(-Math.sign(e.deltaY) * 0.12))
@@ -563,9 +602,13 @@ function buildSliceBars() {
     stage.appendChild(wrap)
     const input = wrap.querySelector('input')
     let held = false
-    input.addEventListener('pointerdown', () => { held = true })
+    input.addEventListener('pointerdown', () => { held = true; focusPanel(i) })
+    input.addEventListener('pointercancel', () => { held = false })
     window.addEventListener('pointerup', () => { held = false })
     input.addEventListener('input', () => {
+      focusPanel(i)
+      // Evita que outro canvas focado retransmita uma posição antiga.
+      input.focus({ preventScroll: true })
       const panel = state.panels[i]
       const axis = VIEW_AXIS[panel?.view]
       const vol = panel?.nv.volumes[0]
@@ -597,7 +640,9 @@ function buildSliceBars() {
       const vox = Math.min(dim - 1, Math.max(0, Math.round(panel.nv.scene.crosshairPos[axis] * dim - 0.5)))
       bar.input.max = dim - 1
       if (!bar.isHeld()) bar.input.value = vox
-      bar.label.textContent = `${vox + 1}/${dim}`
+      const outside = Array.from(panel.nv.scene.crosshairPos).some((v) => !Number.isFinite(v) || v < 0 || v > 1)
+      bar.label.textContent = outside ? 'Fora do FOV' : `${vox + 1}/${dim}`
+      bar.input.title = outside ? 'A posição vinculada está fora da cobertura desta série' : 'Percorrer cortes deste painel'
     }
     requestAnimationFrame(tick)
   }
@@ -831,11 +876,16 @@ async function openSeries(id) {
   try {
     let vol = await volumeFor(entry)
     if (seq !== openSeq) return // outra série foi pedida durante o carregamento
+    const panel = state.panels[0]
+    const position = positionForLoad(panel)
+    panel.loading = true
+    rewireSync()
     // NVImage já exibido noutro painel: clona para não compartilhar entre contextos GL
     if (state.panels.some((p, k) => k > 0 && p && p.nv.volumes.includes(vol))) vol = vol.clone()
     const nv = state.nv
     while (nv.volumes.length) nv.removeVolume(nv.volumes[0])
-    await nv.addVolume(vol)
+    nv.addVolume(vol)
+    restorePosition(panel, position)
     state.vol = vol
     state.origVol = vol
     state.activeId = id
@@ -860,9 +910,12 @@ async function openSeries(id) {
     progress(0)
     log(`${entry.file.name} — ${vol.hdr.dims[1]}×${vol.hdr.dims[2]}×${vol.hdr.dims[3]} voxels`)
   } catch (err) {
+    if (seq !== openSeq) return
     console.error(err)
     progress(0)
     log('Falha ao abrir a série: ' + err.message)
+  } finally {
+    if (seq === openSeq) { state.panels[0].loading = false; rewireSync() }
   }
 }
 
@@ -1237,6 +1290,21 @@ function bind() {
     if (n > 1 && !state.series.length) { log('Abra ao menos uma série antes de comparar.'); return }
     await setLayout(n)
   }))
+
+  for (const [id, key] of [['btnSyncPosition', 'syncPosition'], ['btnSyncZoom', 'syncZoom']]) {
+    $(id).onclick = () => {
+      state[key] = !state[key]
+      $(id).classList.toggle('active', state[key])
+      $(id).setAttribute('aria-pressed', String(state[key]))
+      rewireSync()
+      const panel = state.panels[state.focus]
+      if (state[key] && panel?.nv.volumes.length) {
+        focusPanel(state.focus, true)
+        panel.nv.drawScene()
+      }
+      log(`${key === 'syncPosition' ? 'Posição em mm' : 'Zoom e câmera'}: ${state[key] ? 'vinculados' : 'independentes'}.`)
+    }
+  }
 
   $('btnDicomDir').onclick = () => $('inDicomDir').click()
   $('btnFiles').onclick = () => $('inFiles').click()
